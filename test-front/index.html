@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8"/>
+    <title>Audio Echo MVP</title>
+</head>
+<body>
+<h2>Audio Echo MVP</h2>
+
+<button id="start">Start</button>
+<button id="stop">Stop</button>
+
+<script>
+    let ws;
+    let mediaRecorder;
+
+    let mediaSource;
+    let sourceBuffer;
+    let audio;
+
+    let startedPlayback = false;
+    let startTime;
+
+    let isRecordingStopped = false;
+    let isPlaybackFinished = false;
+
+    document.getElementById("start").onclick = async () => {
+        isRecordingStopped = false;
+        isPlaybackFinished = false;
+        startedPlayback = false;
+
+        ws = new WebSocket("ws://127.0.0.1:8000/ws");
+        ws.binaryType = "arraybuffer";
+
+        // 🎧 создаём потоковое аудио
+        mediaSource = new MediaSource();
+        audio = new Audio();
+        audio.src = URL.createObjectURL(mediaSource);
+
+        mediaSource.addEventListener("sourceopen", () => {
+            sourceBuffer = mediaSource.addSourceBuffer('audio/webm; codecs="opus"');
+        });
+
+        ws.onopen = async () => {
+            console.log("WS connected");
+
+            const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+
+            mediaRecorder = new MediaRecorder(stream, {
+                mimeType: "audio/webm;codecs=opus"
+            });
+
+            startTime = Date.now();
+
+            // 📤 отправка
+            mediaRecorder.ondataavailable = async (event) => {
+                if (event.data.size > 0 && ws.readyState === 1) {
+                    const buffer = await event.data.arrayBuffer();
+                    ws.send(buffer);
+                }
+            };
+
+            // 📥 получение + стриминг в плеер
+            ws.onmessage = (event) => {
+                if (!sourceBuffer || sourceBuffer.updating) return;
+
+                sourceBuffer.appendBuffer(event.data);
+
+                // ⏱ старт воспроизведения через 1 секунду
+                if (!startedPlayback && Date.now() - startTime > 1000) {
+                    audio.play().catch(console.error);
+                    startedPlayback = true;
+                    console.log("Playback started");
+                }
+            };
+
+            mediaRecorder.start(250);
+        };
+    };
+
+    document.getElementById("stop").onclick = () => {
+        if (mediaRecorder) {
+            mediaRecorder.stop();
+            isRecordingStopped = true;
+            console.log("Recording stopped");
+        }
+
+        // ❗ НЕ закрываем ws сразу
+        // ждём окончания буфера
+
+        const checkEnd = setInterval(() => {
+            if (
+                isRecordingStopped &&
+                audio &&
+                audio.currentTime > 0 &&
+                audio.ended
+            ) {
+                console.log("Playback finished, closing WS");
+
+                ws.close();
+                clearInterval(checkEnd);
+            }
+        }, 200);
+    };
+</script>
+</body>
+</html>
