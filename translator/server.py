@@ -18,7 +18,7 @@ def transcribe(audio, prompt=""):
 
 
 SAMPLE_RATE = 16000
-WINDOW_SEC = 3
+WINDOW_SEC = 1.5
 WINDOW = int(SAMPLE_RATE * WINDOW_SEC)
 
 SILENCE_TIMEOUT = 1.0
@@ -27,7 +27,12 @@ PROMPT_WORDS = 10
 
 
 def is_speech(x):
-    return np.sqrt(np.mean(x ** 2)) > 0.01
+    return True
+    if np.sqrt(np.mean(x ** 2)) > 0.01:
+        return True
+    else:
+        print(np.sqrt(np.mean(x ** 2)))
+        return False
 
 
 def norm(text):
@@ -55,6 +60,7 @@ async def ws(ws: WebSocket):
 
     try:
         while True:
+            full_time_start = time.time()
             raw = await ws.receive_bytes()
             chunk = np.frombuffer(raw, dtype=np.float32)
 
@@ -66,7 +72,10 @@ async def ws(ws: WebSocket):
             if speech:
                 last_voice = now
 
+                model_processing_start = time.time()
                 text = transcribe(audio_window, prompt=build_prompt(committed))
+                model_processing_end = time.time()
+
                 if not text:
                     continue
 
@@ -74,15 +83,11 @@ async def ws(ws: WebSocket):
                 if not words:
                     continue
 
-                # ─────────────────────────────
-                # stability tracking (key fix)
-                # ─────────────────────────────
                 new_stable = []
 
                 for w in words:
                     stable_counter[w] = stable_counter.get(w, 0) + 1
 
-                    # слово считается стабильным только если появилось 2+ раз подряд
                     if stable_counter[w] >= 2 and w not in committed:
                         new_stable.append(w)
 
@@ -104,12 +109,20 @@ async def ws(ws: WebSocket):
                     last_candidates = []
                     stable_counter = {}
                     audio_window = np.array([], dtype=np.float32)
+            full_time_end = time.time()
+
+            time_text = f"full time - {full_time_end - full_time_start}"
+            if speech:
+                time_text += f" | model_time - {model_processing_end - model_processing_start}"
+            
+            print(time_text)
 
             await ws.send_text(json.dumps({
                 "stable": " ".join(committed),
                 "pending": " ".join(last_candidates[-PENDING_WORDS:]),
-                "chars": len(" ".join(committed))
+                "chars": len(" ".join(committed)),
+                "speed_logs": time_text
             }))
-
+                
     except WebSocketDisconnect:
         pass
