@@ -1,9 +1,10 @@
 import asyncio
 import websockets
-from websockets.exceptions import ConnectionClosed
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 from fastapi.websockets import WebSocketState
+
 from src.settings import settings
+from src.stt_handlers import backend_to_stt, stt_to_backend
 
 app = FastAPI()
 
@@ -15,7 +16,6 @@ async def websocket_endpoint(client_ws: WebSocket):
     await client_ws.accept()
     print(f"[Proxy] Client connected: {client_ws.client}")
 
-    # Подключаемся к STT-серверу
     try:
         server_ws = await websockets.connect(
             stt_url,
@@ -29,84 +29,25 @@ async def websocket_endpoint(client_ws: WebSocket):
         await client_ws.close(code=1011)
         return
 
-    # Флаг для корректного завершения задач
-    shutdown_flag = asyncio.Event()
-
-    async def backend_to_stt():
-        """Forward: Client → STT"""
-        try:
-            while not shutdown_flag.is_set():
-                try:
-                    # Получаем данные от клиента с таймаутом
-                    data = await asyncio.wait_for(
-                        client_ws.receive_bytes(),
-                        timeout=30.0
-                    )
-                    # Отправляем на STT-сервер
-                    await server_ws.send(data)
-                except WebSocketDisconnect:
-                    print("[Proxy] Client disconnected (backend_to_stt)")
-                    break
-                except asyncio.TimeoutError:
-                    # Проверяем, не пора ли завершаться
-                    if shutdown_flag.is_set():
-                        break
-                    continue
-                except ConnectionClosed:
-                    print("[Proxy] STT connection closed (backend_to_stt)")
-                    break
-        except Exception as e:
-            print(f"[Proxy] backend_to_stt unexpected error: {type(e).__name__}: {e}")
-        finally:
-            shutdown_flag.set()
-
-    async def stt_to_backend():
-        """Forward: STT → Client"""
-        try:
-            while not shutdown_flag.is_set():
-                try:
-                    # Получаем данные от STT-сервера с таймаутом
-                    data = await asyncio.wait_for(
-                        server_ws.recv(),
-                        timeout=30.0
-                    )
-                    # Отправляем клиенту
-                    await client_ws.send_bytes(data)
-                except WebSocketDisconnect:
-                    print("[Proxy] Client disconnected (stt_to_backend)")
-                    break
-                except asyncio.TimeoutError:
-                    if shutdown_flag.is_set():
-                        break
-                    continue
-                except ConnectionClosed:
-                    print("[Proxy] STT connection closed (stt_to_backend)")
-                    break
-        except Exception as e:
-            print(f"[Proxy] stt_to_backend unexpected error: {type(e).__name__}: {e}")
-        finally:
-            shutdown_flag.set()
-
-    # Запускаем обе задачи
-    task1 = asyncio.create_task(backend_to_stt())
-    task2 = asyncio.create_task(stt_to_backend())
+    task1 = asyncio.create_task(backend_to_stt(client_ws, server_ws))
+    task2 = asyncio.create_task(stt_to_backend(client_ws, server_ws))
 
     try:
-        # Ждём завершения любой из задач
-        await asyncio.wait(
+        done, pending = await asyncio.wait(
             [task1, task2],
             return_when=asyncio.FIRST_COMPLETED
         )
+
+        # отменяем вторую задачу
+        for task in pending:
+            task.cancel()
+
+        await asyncio.gather(*pending, return_exceptions=True)
+
     except Exception as e:
         print(f"[Proxy] Unexpected error in main loop: {type(e).__name__}: {e}")
+
     finally:
-        # 🔥 Гарантированная очистка
-        shutdown_flag.set()
-
-        task1.cancel()
-        task2.cancel()
-        await asyncio.gather(task1, task2, return_exceptions=True)
-
         # Закрываем соединения
         try:
             await server_ws.close()
