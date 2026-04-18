@@ -64,6 +64,40 @@ class VADProcessor:
 
         return result, has_speech
 
+    def extract_speech_float32(
+        self, audio: np.ndarray, threshold: float = 0.5
+    ) -> tuple[np.ndarray, bool]:
+        """
+        Возвращает только окна со речью, склеенные подряд.
+        Тишина физически вырезается — массив короче входного.
+        """
+        speech_windows = []
+    
+        for i in range(0, len(audio), self.window_size):
+            window = audio[i: i + self.window_size]
+    
+            # Неполное последнее окно — берём без инференса
+            if len(window) < self.window_size:
+                if len(speech_windows):  # добавляем только если уже есть речь в чанке
+                    speech_windows.append(window)
+                break
+    
+            max_val = np.max(np.abs(window))
+            if max_val < 1e-6:
+                continue  # абсолютная тишина — пропускаем даже инференс
+    
+            window_norm = (window / max_val).astype(np.float32)
+            tensor = torch.from_numpy(window_norm).to(self.device)
+            with torch.no_grad():
+                prob = self.model(tensor.unsqueeze(0), self.sample_rate).item()
+    
+            if prob > threshold:
+                speech_windows.append(window)
+    
+        if speech_windows:
+            return np.concatenate(speech_windows), True
+        return np.array([], dtype=np.float32), False
+
     def reset_states(self) -> None:
         """Сбрасывает внутренние состояния Silero между предложениями."""
         try:

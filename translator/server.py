@@ -7,10 +7,12 @@ import asyncio
 from functools import partial
 from VAD_processing import VADProcessor
 
+VAD_THRESHOLD = 0.75
+
 model = WhisperModel("small", device="cuda", compute_type="float16")
 # model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
-vad = VADProcessor(device="cpu")
+vad = VADProcessor(device="cuda")
 
 
 def transcribe(audio, prompt=""):
@@ -87,9 +89,9 @@ async def ws(websocket: WebSocket):
             chunk = np.frombuffer(raw, dtype=np.float32)
             now = time.time()
 
-                        filtered_chunk, speech = vad.filter_chunk_float32(chunk, VAD_THRESHOLD)
-
-            audio_window = np.concatenate([audio_window, filtered_chunk])[-WINDOW:]
+            speech_chunk, speech = vad.extract_speech_float32(chunk, VAD_THRESHOLD)
+            if speech:
+                audio_window = np.concatenate([audio_window, speech_chunk])[-WINDOW:]
 
             if speech:
                 last_voice = now
