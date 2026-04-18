@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    stt_host: str = "127.0.0.1"
     stt_port: int = 8001
 
     model_config = SettingsConfigDict(
