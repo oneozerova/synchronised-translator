@@ -5,9 +5,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from faster_whisper import WhisperModel
 import asyncio
 from functools import partial
+from VAD_processing import VADProcessor
 
 model = WhisperModel("small", device="cuda", compute_type="float16")
 # model = WhisperModel("tiny", device="cpu", compute_type="int8")
+
+vad = VADProcessor(device="cpu")
 
 
 def transcribe(audio, prompt=""):
@@ -16,7 +19,7 @@ def transcribe(audio, prompt=""):
         language="en",
         vad_filter=True,
         initial_prompt=prompt or None,
-        word_timestamps=True,  # добавить
+        word_timestamps=True,
     )
     words = []
     for seg in segments:
@@ -34,14 +37,6 @@ WINDOW = int(SAMPLE_RATE * WINDOW_SEC)
 SILENCE_TIMEOUT = 0.6
 PENDING_WORDS = 3
 PROMPT_WORDS = 10
-
-
-def is_speech(x):
-    rms = np.sqrt(np.mean(x ** 2))
-    if rms > 0.01:
-        return True
-    print(f"SKIP rms={rms:.4f}")
-    return False
 
 
 def norm(text):
@@ -92,8 +87,9 @@ async def ws(websocket: WebSocket):
             chunk = np.frombuffer(raw, dtype=np.float32)
             now = time.time()
 
-            audio_window = np.concatenate([audio_window, chunk])[-WINDOW:]
-            speech = is_speech(chunk)
+                        filtered_chunk, speech = vad.filter_chunk_float32(chunk, VAD_THRESHOLD)
+
+            audio_window = np.concatenate([audio_window, filtered_chunk])[-WINDOW:]
 
             if speech:
                 last_voice = now
@@ -102,14 +98,13 @@ async def ws(websocket: WebSocket):
                     None, partial(transcribe, audio_window, build_prompt(committed))
                 )
                 model_processing_end = time.time()
-                
+
                 if not word_times:
                     continue
-                
+
                 audio_duration = len(audio_window) / SAMPLE_RATE
                 all_words = [w for w, _ in word_times]
-                
-                # Найти где заканчиваются committed в текущей транскрипции
+
                 anchor_pos = 0
                 if committed:
                     for tail_len in range(min(4, len(committed)), 0, -1):
@@ -120,24 +115,24 @@ async def ws(websocket: WebSocket):
                                 break
                         if anchor_pos:
                             break
-                
-                # Коммитим только слова достаточно далеко от края окна
+
                 for w, end_t in word_times[anchor_pos:]:
                     if audio_duration - end_t > SAFE_MARGIN:
                         committed.append(w)
-                
+
                 pending = [w for w, t in word_times if audio_duration - t <= SAFE_MARGIN]
                 last_candidates = all_words
             else:
-                print("SKIP")
+                print(f"SKIP (VAD)")
                 if now - last_voice > SILENCE_TIMEOUT:
                     if last_candidates:
                         for w in last_candidates[-PENDING_WORDS:]:
                             if w not in committed:
                                 committed.append(w)
                     last_candidates = []
-                    prev_words = []
                     audio_window = np.array([], dtype=np.float32)
+                    # [5] Сброс состояния Silero при сбросе окна
+                    vad.reset_states()
 
             full_time_end = time.time()
             time_text = f"full time - {full_time_end - full_time_start}"
