@@ -6,7 +6,7 @@ from faster_whisper import WhisperModel
 import asyncio
 from functools import partial
 
-model = WhisperModel("base", device="cuda", compute_type="float16")
+model = WhisperModel("small", device="cuda", compute_type="float16")
 # model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 
@@ -14,14 +14,21 @@ def transcribe(audio, prompt=""):
     segments, _ = model.transcribe(
         audio,
         language="en",
-        vad_filter=False,
+        vad_filter=True,
         initial_prompt=prompt or None,
+        word_timestamps=True,  # добавить
     )
-    return " ".join(s.text for s in segments).strip()
+    words = []
+    for seg in segments:
+        for w in seg.words:
+            clean = w.word.lower().strip(".,!?…-_ ")
+            if clean:
+                words.append((clean, w.end))  # (слово, время окончания)
+    return words
 
 
 SAMPLE_RATE = 16000
-WINDOW_SEC = 1.0
+WINDOW_SEC = 2.0
 WINDOW = int(SAMPLE_RATE * WINDOW_SEC)
 
 SILENCE_TIMEOUT = 0.6
@@ -30,12 +37,11 @@ PROMPT_WORDS = 10
 
 
 def is_speech(x):
-    return True
-    if np.sqrt(np.mean(x ** 2)) > 0.01:
+    rms = np.sqrt(np.mean(x ** 2))
+    if rms > 0.01:
         return True
-    else:
-        print(np.sqrt(np.mean(x ** 2)))
-        return False
+    print(f"SKIP rms={rms:.4f}")
+    return False
 
 
 def norm(text):
@@ -71,12 +77,13 @@ async def ws(websocket: WebSocket):
         audio_window = np.array([], dtype=np.float32)
         committed = []
         last_candidates = []
-        stable_counter = {}
+        SAFE_MARGIN = 0.5
         last_voice = time.time()
         loop = asyncio.get_event_loop()
 
         while True:
             full_time_start = time.time()
+            pending = []
 
             raw = await queue.get()
             if raw is None:
@@ -91,28 +98,36 @@ async def ws(websocket: WebSocket):
             if speech:
                 last_voice = now
                 model_processing_start = time.time()
-                text = await loop.run_in_executor(
+                word_times = await loop.run_in_executor(
                     None, partial(transcribe, audio_window, build_prompt(committed))
                 )
                 model_processing_end = time.time()
-
-                if not text:
+                
+                if not word_times:
                     continue
-
-                words = norm(text)
-                if not words:
-                    continue
-
-                new_stable = []
-                for w in words:
-                    stable_counter[w] = stable_counter.get(w, 0) + 1
-                    if stable_counter[w] >= 2 and w not in committed:
-                        new_stable.append(w)
-
-                if new_stable:
-                    committed.extend(new_stable)
-
-                last_candidates = words
+                
+                audio_duration = len(audio_window) / SAMPLE_RATE
+                all_words = [w for w, _ in word_times]
+                
+                # Найти где заканчиваются committed в текущей транскрипции
+                anchor_pos = 0
+                if committed:
+                    for tail_len in range(min(4, len(committed)), 0, -1):
+                        tail = committed[-tail_len:]
+                        for i in range(len(all_words) - tail_len + 1):
+                            if all_words[i:i + tail_len] == tail:
+                                anchor_pos = i + tail_len
+                                break
+                        if anchor_pos:
+                            break
+                
+                # Коммитим только слова достаточно далеко от края окна
+                for w, end_t in word_times[anchor_pos:]:
+                    if audio_duration - end_t > SAFE_MARGIN:
+                        committed.append(w)
+                
+                pending = [w for w, t in word_times if audio_duration - t <= SAFE_MARGIN]
+                last_candidates = all_words
             else:
                 print("SKIP")
                 if now - last_voice > SILENCE_TIMEOUT:
@@ -121,7 +136,7 @@ async def ws(websocket: WebSocket):
                             if w not in committed:
                                 committed.append(w)
                     last_candidates = []
-                    stable_counter = {}
+                    prev_words = []
                     audio_window = np.array([], dtype=np.float32)
 
             full_time_end = time.time()
@@ -130,11 +145,14 @@ async def ws(websocket: WebSocket):
                 time_text += f" | model_time - {model_processing_end - model_processing_start}"
 
             print(time_text)
-            await websocket.send_text(json.dumps({
-                "stable": " ".join(committed),
-                "pending": " ".join(last_candidates[-PENDING_WORDS:]),
-                "chars": len(" ".join(committed)),
-                "speed_logs": time_text
-            }))
+            try:
+                await websocket.send_text(json.dumps({
+                    "stable": " ".join(committed),
+                    "pending": " ".join(pending[-PENDING_WORDS:]),
+                    "chars": len(" ".join(committed)),
+                    "speed_logs": time_text
+                }))
+            except RuntimeError:
+                print("STOP")
 
     await asyncio.gather(receiver(), processor())
