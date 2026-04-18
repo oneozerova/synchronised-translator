@@ -38,7 +38,6 @@ async def websocket_endpoint(client_ws: WebSocket):
             return_when=asyncio.FIRST_COMPLETED
         )
 
-        # отменяем вторую задачу
         for task in pending:
             task.cancel()
 
@@ -48,7 +47,6 @@ async def websocket_endpoint(client_ws: WebSocket):
         print(f"[Proxy] Unexpected error in main loop: {type(e).__name__}: {e}")
 
     finally:
-        # Закрываем соединения
         try:
             await server_ws.close()
         except Exception as e:
