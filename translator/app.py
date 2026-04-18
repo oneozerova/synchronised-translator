@@ -7,7 +7,8 @@ st.set_page_config(page_title="STT", page_icon="🎙️")
 st.title("🎙️ Speech → Text")
 st.caption("Говорите по-английски или загрузите аудио")
 
-WS_URL = "ws://localhost:8000/ws"
+WS_URL = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy/8000/ws"
+# WS_URL = "ws://localhost:8000/ws"
 
 uploaded = st.file_uploader(
     "Загрузите аудио",
@@ -72,7 +73,7 @@ const AUDIO_B64  = {json.dumps(audio_b64 or "")};
 const AUDIO_MIME = {json.dumps(audio_mime)};
 
 const SAMPLE_RATE = 16000;
-const CHUNK_SEC   = 0.5;
+const CHUNK_SEC   = 0.25;
 
 let ws, audioCtx, processor, source, stream;
 let recording = false;
