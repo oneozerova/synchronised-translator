@@ -1,16 +1,21 @@
 import torch
 import soundfile as sf
-from qwen_tts import Qwen3TTSModel
+import numpy as np
+import time
+from faster_qwen3_tts import FasterQwen3TTS
 
-MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-
-model = Qwen3TTSModel.from_pretrained(
-    MODEL_ID,
-    device_map="cuda:0",
-    dtype=torch.float32
+model = FasterQwen3TTS.from_pretrained(
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    device="cuda",
+    dtype=torch.bfloat16,
 )
 
-text = """Мороз и солнце; день чудесный!
+speaker_wav = "my_voice.wav"
+REF_TEXT = "Всем привет, с вами как всегда я, Игорь Пуртов и сегодня я буду делать грязь"
+
+
+text = """
+Мороз и солнце; день чудесный!
 Еще ты дремлешь, друг прелестный —
 Пора, красавица, проснись:
 Открой сомкнуты негой взоры
@@ -39,26 +44,28 @@ text = """Мороз и солнце; день чудесный!
 Нетерпеливого коня
 И навестим поля пустые,
 Леса, недавно столь густые,
-И берег, милый для меня."""
-speaker_wav = "my_voice.wav"  # 3–10 секунд чистого голоса
+И берег, милый для меня.
+"""
+
 chunks = text.split(" ")
 
-prompt_items = model.create_voice_clone_prompt(
+print("Прогрев...")
+model.generate_voice_clone(
+    text="прогрев, пригрев, прогрев, пригрев, прогрев, пригрев, прогрев, пригрев, прогрев, пригрев",
+    language="Russian",
     ref_audio=speaker_wav,
-    ref_text="Всем привет, с вами как всегда я, Игорь Пуртов и сегодня я буду делать грязь",
-    x_vector_only_mode=True,
+    ref_text=REF_TEXT,
+    xvec_only=True,
 )
-
-
+print("Прогрев завершен")
 
 model_window = []
 out = []
-import time 
-
-start = time.time() ## точка отсчета времени
-
 chunks_len = 0
-for i, chunk in enumerate(chunks):
+
+start = time.time()
+
+for chunk in chunks:
     model_window.append(chunk)
     if len(model_window) == 10:
         if chunks_len == 5:
@@ -66,16 +73,14 @@ for i, chunk in enumerate(chunks):
         wav, sr = model.generate_voice_clone(
             text=" ".join(model_window),
             language="Russian",
-            voice_clone_prompt=prompt_items,
-            #**common_gen_kwargs
+            ref_audio=speaker_wav,
+            ref_text=REF_TEXT,
+            xvec_only=True,
         )
         model_window.clear()
         chunks_len += 1
         out.append(wav[0])
 
-end = time.time() - start ## собственно время работы программы
-
-print(end)
-import numpy as np
+print(f"Время: {time.time() - start:.2f}s")
 sf.write("out.wav", np.concatenate(out), sr)
 print("saved -> out.wav")
