@@ -10,8 +10,8 @@ from src.VAD_processing import VADProcessor
 
 VAD_THRESHOLD = 0.75
 
-model = WhisperModel("small", device="cuda", compute_type="float16")
-# model = WhisperModel("tiny", device="cpu", compute_type="int8")
+# model = WhisperModel("small", device="cuda", compute_type="float16")
+model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 vad = VADProcessor(device="cuda")
 

@@ -7,7 +7,9 @@ from src.settings import settings
 
 app = FastAPI()
 
-stt_url = f"ws://{settings.stt_host}:8000/ws"
+# stt_url = f"ws://{settings.stt_host}:8001/ws"
+stt_url = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy/8001/ws"
+print(stt_url)
 
 
 @app.websocket("/ws")
@@ -61,17 +63,24 @@ async def websocket_endpoint(client_ws: WebSocket):
             shutdown_flag.set()
 
     async def stt_to_backend():
-        """Forward: STT → Client"""
+        """Forward: STT → Client (TEXT!)"""
         try:
             while not shutdown_flag.is_set():
                 try:
-                    # Получаем данные от STT-сервера с таймаутом
-                    data = await asyncio.wait_for(
+                    msg = await asyncio.wait_for(
                         server_ws.recv(),
                         timeout=30.0
                     )
-                    # Отправляем клиенту
-                    await client_ws.send_bytes(data)
+
+                    print(msg)
+
+                    # 👇 ВАЖНО: STT шлёт текст (JSON строку)
+                    if isinstance(msg, str):
+                        await client_ws.send_text(msg)
+                    else:
+                        # на всякий случай (если вдруг байты)
+                        await client_ws.send_bytes(msg)
+
                 except WebSocketDisconnect:
                     print("[Proxy] Client disconnected (stt_to_backend)")
                     break
@@ -82,8 +91,9 @@ async def websocket_endpoint(client_ws: WebSocket):
                 except ConnectionClosed:
                     print("[Proxy] STT connection closed (stt_to_backend)")
                     break
+
         except Exception as e:
-            print(f"[Proxy] stt_to_backend unexpected error: {type(e).__name__}: {e}")
+            print(f"[Proxy] stt_to_backend error: {e}")
         finally:
             shutdown_flag.set()
 
