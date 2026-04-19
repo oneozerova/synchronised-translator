@@ -9,6 +9,12 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "numpy>=2.4.4",
     "torch>=2.11.0",
+    "torchaudio>=2.11.0",
     "uvicorn>=0.44.0",
     "websockets>=16.0",
+]
+
+[dependency-groups]
+dev = [
+    "streamlit>=1.56.0",
 ]
