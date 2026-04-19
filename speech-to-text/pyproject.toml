@@ -1,12 +1,20 @@
 [project]
-name = "backend"
+name = "speech-to-text"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.136.0",
-    "pydantic-settings>=2.13.1",
+    "faster-whisper>=1.2.1",
+    "numpy>=2.4.4",
+    "torch>=2.11.0",
+    "torchaudio>=2.11.0",
     "uvicorn>=0.44.0",
     "websockets>=16.0",
+]
+
+[dependency-groups]
+dev = [
+    "streamlit>=1.56.0",
 ]
