@@ -6,7 +6,7 @@ from src.yandexgpt import TranslationSession
 app = FastAPI()
 
 
-@app.websocket("/ws/translate")
+@app.websocket("/ws")
 async def websocket_translate(websocket: WebSocket):
     await websocket.accept()
     session = TranslationSession()

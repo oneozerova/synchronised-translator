@@ -8,8 +8,8 @@ from src.settings import settings
 app = FastAPI()
 
 # stt_url = f"ws://{settings.stt_host}:8001/ws"
-stt_url = "wss://apollo2.ci.nsu.ru/i.purtov/proxy/8000/ws"
-print(stt_url)
+stt_url = "wss://apollo2.ci.nsu.ru/i.purtov/proxy/8001/ws"
+translator_url = "ws://localhost:8002/ws"
 
 
 @app.websocket("/ws")
@@ -17,7 +17,7 @@ async def websocket_endpoint(client_ws: WebSocket):
     await client_ws.accept()
     print(f"[Proxy] Client connected: {client_ws.client}")
 
-    # Подключаемся к STT-серверу
+    # Подключаемся к STT и переводчику
     try:
         server_ws = await websockets.connect(
             stt_url,
@@ -31,11 +31,24 @@ async def websocket_endpoint(client_ws: WebSocket):
         await client_ws.close(code=1011)
         return
 
-    # Флаг для корректного завершения задач
+    try:
+        translator_ws = await websockets.connect(
+            translator_url,
+            ping_interval=20,
+            ping_timeout=10,
+            close_timeout=5
+        )
+        print("[Proxy] Connected to Translator service")
+    except Exception as e:
+        print(f"[Proxy] Failed to connect to Translator: {e}")
+        await server_ws.close()
+        await client_ws.close(code=1011)
+        return
+
     shutdown_flag = asyncio.Event()
 
     async def backend_to_stt():
-        """Forward: Client → STT"""
+        """Client → STT"""
         try:
             while not shutdown_flag.is_set():
                 try:
@@ -63,7 +76,7 @@ async def websocket_endpoint(client_ws: WebSocket):
             shutdown_flag.set()
 
     async def stt_to_backend():
-        """Forward: STT → Client (TEXT!)"""
+        """STT → Translator → Client"""
         try:
             while not shutdown_flag.is_set():
                 try:
@@ -71,14 +84,57 @@ async def websocket_endpoint(client_ws: WebSocket):
                         server_ws.recv(),
                         timeout=30.0
                     )
-
-                    print(msg)
+                    print(f"[STT] Raw: {msg}")
 
                     # 👇 ВАЖНО: STT шлёт текст (JSON строку)
                     if isinstance(msg, str):
-                        await client_ws.send_text(msg)
+                        try:
+                            import json
+                            stt_data = json.loads(msg)
+
+                            # 👇 Извлекаем смысловой текст из STT-ответа
+                            # Приоритет: stable > pending > fallback
+                            text_to_translate = stt_data.get("stable") or stt_data.get("pending") or ""
+
+                            if text_to_translate:
+                                # Отправляем в переводчик только чистый текст
+                                await translator_ws.send(text_to_translate)
+
+                                # Получаем перевод
+                                resp = await asyncio.wait_for(
+                                    translator_ws.recv(),
+                                    timeout=30.0
+                                )
+
+                                # Парсим ответ переводчика
+                                if isinstance(resp, str):
+                                    trans_data = json.loads(resp)
+                                    translated = trans_data.get("translation", text_to_translate)
+                                else:
+                                    translated = text_to_translate
+
+                                # 👇 Отправляем клиенту уже переведённый текст
+                                # (можно обернуть обратно в JSON, если клиент этого ждёт)
+                                await client_ws.send_text(json.dumps({
+                                    "stable": translated,  # или "translation": translated
+                                    "pending": "",
+                                    "chars": len(translated),
+                                    "speed_logs": stt_data.get("speed_logs", "")
+                                }))
+                            else:
+                                # Пустой текст — пропускаем
+                                continue
+
+                        except json.JSONDecodeError as e:
+                            print(f"Failed to parse STT JSON: {e}, raw: {msg[:100]}")
+                            # Fallback: отправляем как есть
+                            await client_ws.send_text(msg)
+                        except Exception as e:
+                            print(f"Translation pipeline error: {e}")
+                            # На ошибке — отправляем оригинал
+                            await client_ws.send_text(msg)
                     else:
-                        # на всякий случай (если вдруг байты)
+                        # Бинарные данные — как есть
                         await client_ws.send_bytes(msg)
 
                 except WebSocketDisconnect:
@@ -91,9 +147,11 @@ async def websocket_endpoint(client_ws: WebSocket):
                 except ConnectionClosed:
                     print("[Proxy] STT connection closed (stt_to_backend)")
                     break
-
-        except Exception as e:
-            print(f"[Proxy] stt_to_backend error: {e}")
+                except Exception as e:
+                    print(f"[Proxy] Error in stt_to_backend: {e}")
+                    # На ошибке — отправляем оригинал
+                    if isinstance(msg, str):
+                        await client_ws.send_text(msg)
         finally:
             shutdown_flag.set()
 
@@ -102,13 +160,7 @@ async def websocket_endpoint(client_ws: WebSocket):
     task2 = asyncio.create_task(stt_to_backend())
 
     try:
-        # Ждём завершения любой из задач
-        await asyncio.wait(
-            [task1, task2],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-    except Exception as e:
-        print(f"[Proxy] Unexpected error in main loop: {type(e).__name__}: {e}")
+        await asyncio.wait([task1, task2], return_when=asyncio.FIRST_COMPLETED)
     finally:
         # 🔥 Гарантированная очистка
         shutdown_flag.set()
@@ -117,11 +169,12 @@ async def websocket_endpoint(client_ws: WebSocket):
         task2.cancel()
         await asyncio.gather(task1, task2, return_exceptions=True)
 
-        # Закрываем соединения
-        try:
-            await server_ws.close()
-        except Exception as e:
-            print(f"[Proxy] Error closing server_ws: {e}")
+        for ws in [server_ws, translator_ws]:
+            # Закрываем соединения
+            try:
+                await ws.close()
+            except Exception as e:
+                print(f"[Proxy] Error closing server_ws: {e}")
 
         try:
             if client_ws.client_state == WebSocketState.CONNECTED:
