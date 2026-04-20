@@ -8,7 +8,7 @@ from src.settings import settings
 app = FastAPI()
 
 # stt_url = f"ws://{settings.stt_host}:8001/ws"
-stt_url = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy/8001/ws"
+stt_url = "wss://apollo2.ci.nsu.ru/i.purtov/proxy/8000/ws"
 print(stt_url)
 
 

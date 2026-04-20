@@ -10,8 +10,8 @@ from src.VAD_processing import VADProcessor
 
 VAD_THRESHOLD = 0.75
 
-# model = WhisperModel("small", device="cuda", compute_type="float16")
-model = WhisperModel("small", device="cuda", compute_type="int8_float16")
+model = WhisperModel("small", device="cuda", compute_type="float16")
+# model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 vad = VADProcessor(device="cuda")
 
@@ -72,6 +72,8 @@ def transcribe(audio, prompt=""):
 
 
 SAMPLE_RATE = 16000
+WINDOW_SEC = 2.0
+WINDOW = int(SAMPLE_RATE * WINDOW_SEC)
 
 SILENCE_TIMEOUT = 0.6
 PENDING_WORDS = 3

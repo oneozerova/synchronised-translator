@@ -4,6 +4,9 @@ from typing import List
 
 from openai import OpenAI
 
+# ─────────────────────────────────────────────────────────────
+# Ваша конфигурация и логика (без изменений)
+# ─────────────────────────────────────────────────────────────
 YANDEX_API_KEY = os.environ["YANDEX_API_KEY"]
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "b1gq32mi56gh15jmvblj")
 YANDEX_MODEL = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite/latest"
@@ -23,7 +26,6 @@ SYSTEM_PROMPT = """
 5. Сохраняй имена, числа, термины, стиль и смысл.
 6. Не объясняй перевод, не добавляй метки.
 """.strip()
-
 
 client = OpenAI(
     api_key=YANDEX_API_KEY,
