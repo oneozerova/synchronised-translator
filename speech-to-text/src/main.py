@@ -11,7 +11,7 @@ from src.VAD_processing import VADProcessor
 VAD_THRESHOLD = 0.75
 
 # model = WhisperModel("small", device="cuda", compute_type="float16")
-model = WhisperModel("tiny", device="cpu", compute_type="int8")
+model = WhisperModel("small", device="cuda", compute_type="float16")
 
 vad = VADProcessor(device="cuda")
 
@@ -19,27 +19,43 @@ vad = VADProcessor(device="cuda")
 def transcribe(audio, prompt=""):
     segments, _ = model.transcribe(
         audio,
-        language="en",
-        vad_filter=True,
+        task="translate",          # <-- ключевое изменение
+        language="ru",              # автоопределение языка
+        vad_filter=True,           # у тебя уже есть свой VAD
         initial_prompt=prompt or None,
+
+        # decoding под streaming
+        beam_size=1,
+        best_of=1,
+        temperature=0.0,
+        condition_on_previous_text=True,
+        compression_ratio_threshold=2.4,
+        no_speech_threshold=0.6,
+        log_prob_threshold=-1.0,
+
         word_timestamps=True,
     )
+
     words = []
     for seg in segments:
         for w in seg.words:
-            clean = w.word.lower().strip(".,!?…-_ ")
-            if clean:
-                words.append((clean, w.end))  # (слово, время окончания)
+            token = w.word.strip()
+            if token:
+                words.append((token, w.end))
+
     return words
 
 
 SAMPLE_RATE = 16000
-WINDOW_SEC = 2.0
-WINDOW = int(SAMPLE_RATE * WINDOW_SEC)
 
 SILENCE_TIMEOUT = 0.6
 PENDING_WORDS = 3
 PROMPT_WORDS = 10
+WINDOW_SEC = 2.0
+OVERLAP_SEC = 0.01
+
+WINDOW = int(SAMPLE_RATE * WINDOW_SEC)
+OVERLAP = int(SAMPLE_RATE * OVERLAP_SEC)
 
 
 def norm(text):
@@ -56,6 +72,17 @@ app = FastAPI()
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+def preprocess_audio(chunk: np.ndarray) -> np.ndarray:
+    # remove DC offset
+    chunk = chunk - np.mean(chunk)
+
+    # normalize (RMS-like)
+    max_val = np.max(np.abs(chunk)) + 1e-6
+    chunk = chunk / max_val
+
+    return chunk.astype(np.float32)
 
 
 @app.websocket("/ws")
@@ -75,7 +102,7 @@ async def ws(websocket: WebSocket):
         audio_window = np.array([], dtype=np.float32)
         committed = []
         last_candidates = []
-        SAFE_MARGIN = 0.5
+        SAFE_MARGIN = 0.7
         last_voice = time.time()
         loop = asyncio.get_event_loop()
 
@@ -90,9 +117,14 @@ async def ws(websocket: WebSocket):
             chunk = np.frombuffer(raw, dtype=np.float32)
             now = time.time()
 
+            chunk = preprocess_audio(chunk=chunk)
+
             speech_chunk, speech = vad.extract_speech_float32(chunk, VAD_THRESHOLD)
             if speech:
-                audio_window = np.concatenate([audio_window, speech_chunk])[-WINDOW:]
+                audio_window = np.concatenate([audio_window, speech_chunk])
+
+                if len(audio_window) > WINDOW:
+                    audio_window = audio_window[-(WINDOW + OVERLAP):]
 
             if speech:
                 last_voice = now
@@ -133,7 +165,7 @@ async def ws(websocket: WebSocket):
                             if w not in committed:
                                 committed.append(w)
                     last_candidates = []
-                    audio_window = np.array([], dtype=np.float32)
+                    audio_window = audio_window[-OVERLAP:]
                     # [5] Сброс состояния Silero при сбросе окна
                     vad.reset_states()
 

@@ -7,8 +7,8 @@ st.set_page_config(page_title="STT", page_icon="🎙️")
 st.title("🎙️ Speech → Text")
 st.caption("Говорите по-английски или загрузите аудио")
 
-# WS_URL = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy/8000/ws"
-WS_URL = "ws://localhost:8000/ws"
+WS_URL = "wss://apollo2.ci.nsu.ru/m.unzhakov/proxy/8010/ws"
+# WS_URL = "ws://127.0.0.1:8010/ws"
 
 uploaded = st.file_uploader(
     "Загрузите аудио",
