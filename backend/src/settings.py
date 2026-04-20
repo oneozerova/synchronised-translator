@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     tts_host: str = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy"
     tts_port: int = 8003
     tts_path: str = "api/generate"
+    enable_tts: bool = False
+    tts_required: bool = False
 
     yandex_api_key: str = ""
     
@@ -23,7 +25,6 @@ class Settings(BaseSettings):
 
     @property
     def tts_url(self) -> str:
-        print(f"{self.tts_host}\n{self.tts_port}\n{self.tts_path}")
         return f"{self.tts_host}/{self.tts_port}/{self.tts_path}"
 
 

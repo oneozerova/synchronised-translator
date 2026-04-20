@@ -16,9 +16,12 @@ app = FastAPI()
 
 stt_url = settings.stt_url
 tts_url = settings.tts_url
+enable_tts = settings.enable_tts
+tts_required = settings.tts_required
 
 print(f"[Proxy] STT URL: {stt_url}")
 print(f"[Proxy] TTS URL: {tts_url}")
+print(f"[Proxy] TTS enabled: {enable_tts}, required: {tts_required}")
 
 
 MAX_CHUNK_WORDS = 10
@@ -138,20 +141,24 @@ async def websocket_endpoint(client_ws: WebSocket):
         await client_ws.close(code=1011)
         return
 
-    try:
-        tts_ws = await websockets.connect(
-            tts_url,
-            ping_interval=20,
-            ping_timeout=10,
-            close_timeout=5,
-            max_size=None,
-        )
-        print("[Proxy] Connected to TTS server")
-    except Exception as e:
-        print(f"[Proxy] Failed to connect to TTS: {e}")
-        await server_ws.close()
-        await client_ws.close(code=1011)
-        return
+    tts_ws = None
+    if enable_tts:
+        try:
+            tts_ws = await websockets.connect(
+                tts_url,
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=5,
+                max_size=None,
+            )
+            print("[Proxy] Connected to TTS server")
+        except Exception as e:
+            print(f"[Proxy] Failed to connect to TTS: {e}")
+            if tts_required:
+                await server_ws.close()
+                await client_ws.close(code=1011)
+                return
+            print("[Proxy] Continue without TTS (STT + translation only)")
 
     translation_session = TranslationSession()
     source_committed_words: list[str] = []
@@ -184,6 +191,12 @@ async def websocket_endpoint(client_ws: WebSocket):
                             continue
 
                         if control.get("event") == "tts_start":
+                            if tts_ws is None:
+                                await client_ws.send_text(json.dumps({
+                                    "event": "warning",
+                                    "message": "TTS disabled or unavailable for this session",
+                                }))
+                                continue
                             tts_start_payload = {
                                 "event": "start",
                                 "ref_audio": control.get("ref_audio") or build_silent_wav_base64(),
@@ -242,7 +255,7 @@ async def websocket_endpoint(client_ws: WebSocket):
                                             source_chunk,
                                         )
                                         if translated_chunk:
-                                            if not tts_state["started"]:
+                                            if tts_ws is not None and not tts_state["started"]:
                                                 await tts_ws.send(json.dumps({
                                                     "event": "start",
                                                     "ref_audio": build_silent_wav_base64(),
@@ -251,12 +264,13 @@ async def websocket_endpoint(client_ws: WebSocket):
                                                 }))
                                                 tts_state["started"] = True
                                             translated_chunks.append(translated_chunk)
-                                            await tts_ws.send(json.dumps({
-                                                "event": "chunk",
-                                                "seq": sequence_state["value"],
-                                                "text": translated_chunk,
-                                            }))
-                                            sequence_state["value"] += 1
+                                            if tts_ws is not None:
+                                                await tts_ws.send(json.dumps({
+                                                    "event": "chunk",
+                                                    "seq": sequence_state["value"],
+                                                    "text": translated_chunk,
+                                                }))
+                                                sequence_state["value"] += 1
 
                             translated_stable = " ".join(translated_chunks).strip()
                             await client_ws.send_text(json.dumps({
@@ -299,6 +313,10 @@ async def websocket_endpoint(client_ws: WebSocket):
 
     async def tts_to_backend():
         """TTS -> Client (JSON and binary PCM frames)."""
+        if tts_ws is None:
+            while not shutdown_flag.is_set():
+                await asyncio.sleep(0.5)
+            return
         try:
             while not shutdown_flag.is_set():
                 try:
@@ -333,15 +351,17 @@ async def websocket_endpoint(client_ws: WebSocket):
         task3.cancel()
         await asyncio.gather(task1, task2, task3, return_exceptions=True)
 
-        try:
-            await tts_ws.send(json.dumps({"event": "end"}))
-        except Exception:
-            pass
+        if tts_ws is not None:
+            try:
+                await tts_ws.send(json.dumps({"event": "end"}))
+            except Exception:
+                pass
 
         for ws in [server_ws, tts_ws]:
             # Закрываем соединения
             try:
-                await ws.close()
+                if ws is not None:
+                    await ws.close()
             except Exception as e:
                 print(f"[Proxy] Error closing server_ws: {e}")
 

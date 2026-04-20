@@ -11,7 +11,8 @@ from src.VAD_processing import VADProcessor
 
 VAD_THRESHOLD = 0.75
 
-model = WhisperModel("small", device="cuda", compute_type="int8_float16")
+model = WhisperModel("small", device="cuda", compute_type="int8_float16") # ДЛЯ ЗАПУСКА НА GPU
+# model = WhisperModel("base", device="cpu", compute_type="int8") # ДЛЯ ЛОКАЛЬНОГО ЗАПУСКА НА CPU
 vad = VADProcessor(device="cuda")
 
 from collections import Counter
