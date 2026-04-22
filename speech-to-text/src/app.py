@@ -1,232 +1,454 @@
+"""
+Streamlit-фронтенд для стримингового Russian STT / EN Translation
+Запуск: streamlit run app.py
+"""
 import base64
 import json
+
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="STT", page_icon="🎙️")
-st.title("🎙️ Speech → Text")
-st.caption("Говорите по-английски или загрузите аудио")
+st.set_page_config(page_title="Live STT · RU→EN", page_icon="🎙️", layout="centered")
+st.title("🎙️ Live Speech-to-Text")
+st.caption("Whisper large-v3 · real-time streaming · Russian → English")
 
-WS_URL = "wss://apollo2.ci.nsu.ru/m.unzhakov/proxy/8010/ws"
-# WS_URL = "ws://127.0.0.1:8010/ws"
+WS_URL = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy/8001/ws"
 
 uploaded = st.file_uploader(
-    "Загрузите аудио",
+    "Аудиофайл (WAV / MP3 / M4A / FLAC) — или оставь пустым для микрофона",
     type=["wav", "mp3", "m4a", "ogg", "webm", "flac"],
 )
 
-audio_b64 = None
-audio_mime = ""
-audio_name = ""
+audio_b64  = ""
+audio_name = "микрофон"
 
 if uploaded is not None:
-    audio_bytes = uploaded.getvalue()
-    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-    audio_mime = uploaded.type
+    audio_b64  = base64.b64encode(uploaded.getvalue()).decode("ascii")
     audio_name = uploaded.name
 
-components.html(f"""
+components.html(
+    f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
 <style>
-  body {{ font-family: sans-serif; margin: 0; }}
-  #btn {{
-    padding: 12px 28px;
-    font-size: 16px;
-    cursor: pointer;
-    border-radius: 8px;
-    border: none;
-    background: #f63366;
-    color: white;
-  }}
-  #btn.active {{ background: #555; }}
-  #status {{
-    margin: 8px 0;
-    color: #888;
-    font-size: 13px;
-  }}
-  #output {{
-    margin-top: 12px;
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+  body {{
+    font-family: 'Courier New', monospace;
+    background: #0f0f0f;
+    color: #e0e0e0;
     padding: 16px;
-    background: #f8f8f8;
-    border-radius: 8px;
-    min-height: 140px;
-    font-size: 16px;
-    line-height: 1.7;
-    border: 1px solid #e0e0e0;
+    min-height: 100vh;
   }}
+
+  .badges {{
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+  }}
+  .badge {{
+    display: inline-block;
+    padding: 3px 10px;
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #555;
+    letter-spacing: 0.04em;
+  }}
+  .badge.mode-translate {{ border-color: #1a3a2a; color: #4ade80; }}
+  .badge.mode-transcribe {{ border-color: #2a2a3a; color: #818cf8; }}
+
+  .controls {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }}
+
+  #btn {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #e0e0e0;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    transition: background 0.15s, border-color 0.15s;
+  }}
+  #btn:hover  {{ background: #252525; border-color: #555; }}
+  #btn.active {{ background: #2a0a0a; border-color: #8b1a1a; color: #ff6b6b; }}
+
+  .dot {{
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #444;
+    transition: background 0.2s;
+  }}
+  #btn.active .dot {{
+    background: #ff4444;
+    box-shadow: 0 0 6px #ff4444;
+    animation: pulse 1s infinite;
+  }}
+  @keyframes pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50%       {{ opacity: 0.4; }}
+  }}
+
+  #status {{
+    font-size: 12px;
+    color: #555;
+    letter-spacing: 0.04em;
+  }}
+  #status.live  {{ color: #4ade80; }}
+  #status.error {{ color: #f87171; }}
+
+  .transcript-wrap {{
+    border: 1px solid #222;
+    border-radius: 8px;
+    background: #141414;
+    padding: 14px 16px;
+    min-height: 160px;
+    margin-bottom: 10px;
+    line-height: 1.8;
+    font-size: 15px;
+    letter-spacing: 0.01em;
+    word-break: break-word;
+    position: relative;
+  }}
+
+  .stable  {{ color: #e0e0e0; }}
+  .pending {{
+    color: #4a4a4a;
+    font-style: italic;
+    transition: color 0.25s;
+  }}
+  .pending.fresh {{ color: #6a6a6a; }}
+
+  .cursor {{
+    display: inline-block;
+    width: 2px; height: 1em;
+    background: #4ade80;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    opacity: 0;
+  }}
+  .cursor.visible {{
+    opacity: 1;
+    animation: blink 1s step-end infinite;
+  }}
+  @keyframes blink {{
+    0%, 100% {{ opacity: 1; }}
+    50%       {{ opacity: 0; }}
+  }}
+
+  .latency-bar-wrap {{
+    height: 3px;
+    background: #1a1a1a;
+    border-radius: 2px;
+    margin-bottom: 10px;
+    overflow: hidden;
+  }}
+  .latency-bar {{
+    height: 100%;
+    width: 0%;
+    background: #4ade80;
+    border-radius: 2px;
+    transition: width 0.4s, background 0.4s;
+  }}
+
+  .stats {{
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+    color: #3a3a3a;
+    letter-spacing: 0.05em;
+    flex-wrap: wrap;
+  }}
+  .stat {{ display: flex; gap: 5px; }}
+  .stat-val           {{ color: #555; }}
+  .stat-val.fast      {{ color: #4ade80; }}
+  .stat-val.ok        {{ color: #facc15; }}
+  .stat-val.slow      {{ color: #f87171; }}
+
+  #clear, #copy {{
+    padding: 5px 12px;
+    background: transparent;
+    border: 1px solid #2a2a2a;
+    border-radius: 5px;
+    color: #444;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    transition: border-color 0.15s, color 0.15s;
+  }}
+  #clear:hover {{ border-color: #555;    color: #888; }}
+  #copy:hover  {{ border-color: #4ade80; color: #4ade80; }}
 </style>
+</head>
+<body>
 
-<button id="btn" onclick="toggle()">🎙️ Start</button>
-<div id="status">Idle</div>
-
-<div style="margin-top:10px; font-size:13px; color:#666;">
-  {"📁 " + audio_name if audio_name else "📁 файл не выбран (используется микрофон)"}
+<div class="badges">
+  <span class="badge">SOURCE: {audio_name}</span>
+  <span class="badge" id="badge-task">TASK: —</span>
+  <span class="badge" id="badge-lang">LANG: —</span>
 </div>
 
-<audio id="player" controls style="width:100%; margin-top:10px;"></audio>
+<div class="controls">
+  <button id="btn" onclick="toggle()">
+    <span class="dot"></span>
+    <span id="btn-label">START</span>
+  </button>
+  <button id="clear" onclick="clearTranscript()">CLEAR</button>
+  <button id="copy"  onclick="copyTranscript()">COPY</button>
+  <span id="status">idle</span>
+</div>
 
-<div id="output"><span id="committed"></span></div>
+<div class="latency-bar-wrap">
+  <div class="latency-bar" id="latency-bar"></div>
+</div>
+
+<div class="transcript-wrap" id="transcript-wrap">
+  <span class="stable"  id="stable"></span>
+  <span class="pending" id="pending"></span>
+  <span class="cursor"  id="cursor"></span>
+</div>
+
+<div class="stats">
+  <div class="stat">CHARS   <span class="stat-val" id="stat-chars">0</span></div>
+  <div class="stat">WORDS   <span class="stat-val" id="stat-words">0</span></div>
+  <div class="stat">MODEL   <span class="stat-val" id="stat-lat">—</span></div>
+  <div class="stat">AVG     <span class="stat-val" id="stat-avg">—</span></div>
+  <div class="stat"><span class="stat-val" id="stat-log"></span></div>
+</div>
 
 <script>
-const WS_URL   = "{WS_URL}";
-const HAS_FILE = {str(audio_b64 is not None).lower()};
-const AUDIO_B64  = {json.dumps(audio_b64 or "")};
-const AUDIO_MIME = {json.dumps(audio_mime)};
+const WS_URL    = "{WS_URL}";
+const HAS_FILE  = {str(bool(audio_b64)).lower()};
+const AUDIO_B64 = {json.dumps(audio_b64)};
 
 const SAMPLE_RATE = 16000;
-const CHUNK_SEC   = 0.25;
 
-let ws, audioCtx, processor, source, stream;
-let recording = false;
-let buffer = [];
+// Размер чанка: 0.2s — хороший баланс для large-v3.
+// С очередью drain-all задержка = время модели, а не размер чанка.
+const CHUNK_SEC = 0.1;
 
-function toggle() {{
-  recording ? stop() : start();
+let ws           = null;
+let recording    = false;
+let inputCtx     = null;
+let micStream    = null;
+let micSrc       = null;
+let processor    = null;
+let inputBuf     = [];
+let pendingTimer = null;
+
+// ── UI ────────────────────────────────────────────────────────────────────────
+
+function setStatus(text, cls = "") {{
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className   = cls;
 }}
+
+function setBtn(active) {{
+  document.getElementById("btn").className        = active ? "active" : "";
+  document.getElementById("btn-label").textContent = active ? "STOP" : "START";
+}}
+
+function setCursor(visible) {{
+  document.getElementById("cursor").className =
+    "cursor" + (visible ? " visible" : "");
+}}
+
+function setTranscript(stable, pending) {{
+  document.getElementById("stable").textContent = stable || "";
+
+  const pEl = document.getElementById("pending");
+  pEl.textContent = pending ? (" " + pending) : "";
+  pEl.classList.add("fresh");
+  clearTimeout(pendingTimer);
+  pendingTimer = setTimeout(() => pEl.classList.remove("fresh"), 350);
+
+  const w = document.getElementById("transcript-wrap");
+  w.scrollTop = w.scrollHeight;
+}}
+
+function updateStats(stable, pending, log) {{
+  const full = ((stable || "") + " " + (pending || "")).trim();
+  document.getElementById("stat-chars").textContent = (stable || "").length;
+  document.getElementById("stat-words").textContent =
+    full ? full.split(/\s+/).filter(Boolean).length : 0;
+  document.getElementById("stat-log").textContent = log || "";
+
+  // Парсим "model Xms · avg Yms · ..."
+  // (формат изменился — раньше было "full Xms", теперь "model Xms")
+  const mModel = log && log.match(/model\\s+(\\d+)ms/);
+  const mAvg   = log && log.match(/avg\\s+(\\d+)ms/);
+  const modelMs = mModel ? parseInt(mModel[1]) : null;
+  const avgMs   = mAvg   ? parseInt(mAvg[1])   : null;
+
+  if (modelMs !== null) {{
+    const latEl = document.getElementById("stat-lat");
+    const barEl = document.getElementById("latency-bar");
+    latEl.textContent = modelMs + "ms";
+    latEl.className   = modelMs < 800  ? "stat-val fast" :
+                        modelMs < 1500 ? "stat-val ok"   : "stat-val slow";
+    const pct = Math.min(modelMs / 2000 * 100, 100);
+    barEl.style.width      = pct + "%";
+    barEl.style.background = modelMs < 800  ? "#4ade80" :
+                             modelMs < 1500 ? "#facc15" : "#f87171";
+  }}
+
+  if (avgMs !== null) {{
+    const avgEl = document.getElementById("stat-avg");
+    avgEl.textContent = avgMs + "ms";
+    avgEl.className   = avgMs < 800  ? "stat-val fast" :
+                        avgMs < 1500 ? "stat-val ok"   : "stat-val slow";
+  }}
+}}
+
+function updateBadges(task, lang) {{
+  if (!task) return;
+  const taskEl = document.getElementById("badge-task");
+  const langEl = document.getElementById("badge-lang");
+  taskEl.textContent = "TASK: " + task.toUpperCase();
+  taskEl.className   = "badge mode-" + task;
+  langEl.textContent = "LANG: " + (lang || "").toUpperCase();
+}}
+
+function clearTranscript() {{
+  setTranscript("", "");
+  updateStats("", "", "");
+}}
+
+function copyTranscript() {{
+  const text = (document.getElementById("stable").textContent || "").trim();
+  if (!text) return;
+  navigator.clipboard.writeText(text).catch(() => {{}});
+}}
+
+// ── File streaming ────────────────────────────────────────────────────────────
+
+function b64ToBytes(b64) {{
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}}
+
+async function streamFile() {{
+  setStatus("decoding…", "");
+  const bytes   = b64ToBytes(AUDIO_B64);
+  const decCtx  = new AudioContext();
+  const decoded = await decCtx.decodeAudioData(bytes.buffer.slice(0));
+  const offline = new OfflineAudioContext(
+    1, Math.ceil(decoded.duration * SAMPLE_RATE), SAMPLE_RATE
+  );
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offline.destination);
+  src.start();
+  const rendered = await offline.startRendering();
+  const samples  = rendered.getChannelData(0);
+
+  setStatus("streaming…", "live");
+  const chunkN = Math.floor(SAMPLE_RATE * CHUNK_SEC);
+  for (let i = 0; i < samples.length && recording; i += chunkN) {{
+    const chunk = new Float32Array(
+      samples.subarray(i, Math.min(i + chunkN, samples.length))
+    );
+    if (ws?.readyState === WebSocket.OPEN) ws.send(chunk.buffer);
+    await new Promise(r => setTimeout(r, CHUNK_SEC * 1000));
+  }}
+  if (recording) setStatus("sent, processing…", "live");
+}}
+
+// ── Mic streaming ─────────────────────────────────────────────────────────────
+
+async function startMic() {{
+  micStream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+  inputCtx  = new AudioContext({{ sampleRate: SAMPLE_RATE }});
+  micSrc    = inputCtx.createMediaStreamSource(micStream);
+  processor = inputCtx.createScriptProcessor(4096, 1, 1);
+
+  const chunkN = Math.floor(SAMPLE_RATE * CHUNK_SEC);
+  processor.onaudioprocess = e => {{
+    inputBuf.push(...e.inputBuffer.getChannelData(0));
+    while (inputBuf.length >= chunkN) {{
+      const chunk = new Float32Array(inputBuf.splice(0, chunkN));
+      if (ws?.readyState === WebSocket.OPEN) ws.send(chunk.buffer);
+    }}
+  }};
+  micSrc.connect(processor);
+  processor.connect(inputCtx.destination);
+  setStatus("streaming…", "live");
+}}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+
+function toggle() {{ recording ? stop() : start(); }}
 
 async function start() {{
   recording = true;
   setBtn(true);
-  setStatus("Connecting...");
-
-  document.getElementById("output").innerHTML = '<span id="committed"></span>';
+  setCursor(true);
+  setStatus("connecting…", "");
+  clearTranscript();
 
   ws = new WebSocket(WS_URL);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = async () => {{
-    if (HAS_FILE) {{
-      setStatus("Playing + streaming file");
+    if (HAS_FILE) await streamFile();
+    else          await startMic();
+  }};
 
-      // ▶️ ВОСПРОИЗВЕДЕНИЕ
-      const player = document.getElementById("player");
-      player.src = "data:" + AUDIO_MIME + ";base64," + AUDIO_B64;
-      player.currentTime = 0;
-
-      try {{
-        await player.play();
-      }} catch (e) {{
-        console.log("Playback blocked:", e);
-      }}
-
-      // ▶️ СТРИМИНГ
-      await streamFile();
-    }} else {{
-      setStatus("Recording mic");
-
-      stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
-      audioCtx = new AudioContext({{ sampleRate: SAMPLE_RATE }});
-      source = audioCtx.createMediaStreamSource(stream);
-      processor = audioCtx.createScriptProcessor(4096, 1, 1);
-
-      const chunkSamples = Math.floor(SAMPLE_RATE * CHUNK_SEC);
-
-      processor.onaudioprocess = (e) => {{
-        buffer.push(...e.inputBuffer.getChannelData(0));
-
-        while (buffer.length >= chunkSamples) {{
-          const chunk = new Float32Array(buffer.splice(0, chunkSamples));
-          if (ws.readyState === WebSocket.OPEN) {{
-            ws.send(chunk.buffer);
-          }}
-        }}
-      }};
-
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
+  ws.onmessage = e => {{
+    if (typeof e.data !== "string") return;
+    let p;
+    try {{ p = JSON.parse(e.data); }} catch {{ return; }}
+    if (p.stable !== undefined) {{
+      setTranscript(p.stable, p.pending || "");
+      updateStats(p.stable, p.pending, p.speed_logs);
+      updateBadges(p.task, p.lang);
     }}
   }};
 
-  ws.onmessage = (e) => {{
-    let payload;
-    try {{
-      payload = JSON.parse(e.data);
-    }} catch {{
-      return;
-    }}
-
-    const committedEl = document.getElementById("committed");
-    if (committedEl) {{
-      committedEl.textContent = payload.stable ?? "";
-    }}
-  }};
-}}
-
-async function streamFile() {{
-  const bytes = base64ToUint8Array(AUDIO_B64);
-  const arrayBuffer = bytes.buffer;
-
-  const ctx = new AudioContext();
-  const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
-
-  // ✅ РЕСЕМПЛ В 16kHz (КРИТИЧНО)
-  const offline = new OfflineAudioContext(
-    1,
-    Math.ceil(decoded.duration * 16000),
-    16000
-  );
-
-  const src = offline.createBufferSource();
-  src.buffer = decoded;
-  src.connect(offline.destination);
-  src.start();
-
-  const rendered = await offline.startRendering();
-  const samples = rendered.getChannelData(0);
-
-  const chunkSamples = Math.floor(16000 * CHUNK_SEC);
-
-  for (let i = 0; i < samples.length && recording; i += chunkSamples) {{
-    const end = Math.min(i + chunkSamples, samples.length);
-    const chunk = new Float32Array(samples.subarray(i, end));
-
-    if (ws.readyState === WebSocket.OPEN) {{
-      ws.send(chunk.buffer);
-    }}
-
-    await sleep(CHUNK_SEC * 1000);
-  }}
+  ws.onerror = () => setStatus("websocket error", "error");
+  ws.onclose = () => {{ if (recording) setStatus("connection closed", "error"); }};
 }}
 
 function stop() {{
   recording = false;
   setBtn(false);
-  setStatus("Stopped");
+  setCursor(false);
+  setStatus("stopped", "");
+  inputBuf = [];
 
+  clearTimeout(pendingTimer);
   if (processor) processor.disconnect();
-  if (source) source.disconnect();
-  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (micSrc)    micSrc.disconnect();
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (inputCtx)  inputCtx.close().catch(() => {{}});
+  processor = micSrc = micStream = inputCtx = null;
+
   if (ws) ws.close();
-
-  const player = document.getElementById("player");
-  if (player) {{
-    player.pause();
-    player.currentTime = 0;
-  }}
-
-  buffer = [];
-}}
-
-function base64ToUint8Array(base64) {{
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {{
-    bytes[i] = binary.charCodeAt(i);
-  }}
-  return bytes;
-}}
-
-function sleep(ms) {{
-  return new Promise(r => setTimeout(r, ms));
-}}
-
-function setBtn(active) {{
-  const b = document.getElementById("btn");
-  b.textContent = active ? "⏹️ Stop" : "🎙️ Start";
-  b.className = active ? "active" : "";
-}}
-
-function setStatus(msg) {{
-  document.getElementById("status").textContent = msg;
+  ws = null;
 }}
 </script>
-""", height=500)
+</body>
+</html>
+""",
+    height=520,
+)
