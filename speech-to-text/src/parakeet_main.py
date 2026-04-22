@@ -43,7 +43,7 @@ PENDING_WORDS = 4   # последние N слов идут в "pending" для
 asr_model: nemo_asr.models.ASRModel = (
     nemo_asr.models.ASRModel
     .from_pretrained("nvidia/nemotron-speech-streaming-en-0.6b")
-    .cuda()
+    .cpu()
     .eval()
 )
 
@@ -59,7 +59,7 @@ _DROP_EXTRA: int = getattr(
     asr_model.encoder.streaming_cfg, "drop_extra_pre_encoded", 0
 )
 
-vad = VADProcessor(device="cuda")
+vad = VADProcessor(device="cpu")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -76,8 +76,8 @@ def features_from_audio(audio: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
     float32 numpy [T] → log-mel фичи [1, n_mels, T'] + длины.
     Вызывается препроцессором модели (без dither, без pad).
     """
-    sig     = torch.from_numpy(audio).unsqueeze(0).cuda()
-    sig_len = torch.tensor([len(audio)], device="cuda")
+    sig     = torch.from_numpy(audio).unsqueeze(0).cpu()
+    sig_len = torch.tensor([len(audio)], device="cpu")
     feats, feat_len = asr_model.preprocessor(input_signal=sig, length=sig_len)
     return feats, feat_len
 
@@ -213,6 +213,7 @@ async def ws_endpoint(websocket: WebSocket):
         try:
             while True:
                 raw = await websocket.receive_bytes()
+                print(len(raw))
                 await queue.put(raw)
         except WebSocketDisconnect:
             await queue.put(None)
