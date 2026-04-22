@@ -13,7 +13,7 @@ import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Live Translator", page_icon="🎧", layout="centered")
 st.title("🎧 Live Speech Translator")
-st.caption("Speech -> STT -> Translation -> TTS")
+st.caption("Speech -> STT -> [optional: in-process Translator в backend] -> TTS (USE_TRANSLATOR)")
 
 ws_url = st.text_input("Backend WebSocket URL", value="ws://127.0.0.1:8000/ws")
 

@@ -11,6 +11,7 @@ from fastapi.websockets import WebSocketState
 from websockets.exceptions import ConnectionClosed
 
 from src.settings import settings
+from src.translator import TranslationSession
 
 app = FastAPI()
 logger = logging.getLogger("backend-orchestrator")
@@ -36,7 +37,7 @@ def _new_suffix(full_text: str, previous_full_text: str) -> str:
     if not previous:
         return current
     if current.startswith(previous):
-        return current[len(previous):].strip()
+        return current[len(previous) :].strip()
 
     overlap = min(len(previous), len(current))
     for size in range(overlap, 0, -1):
@@ -49,9 +50,10 @@ def _new_suffix(full_text: str, previous_full_text: str) -> str:
 async def health():
     return {
         "status": "ok",
-        "stt": f"ws://{settings.stt_host}:{settings.stt_port}/ws",
-        "translator": f"ws://{settings.translator_host}:{settings.translator_port}/ws",
-        "tts": f"ws://{settings.tts_host}:{settings.tts_port}{settings.tts_path}",
+        "use_translator": settings.use_translator,
+        "translator_mode": "in-process" if settings.use_translator else None,
+        "stt": settings.stt_websocket_url(),
+        "tts": settings.tts_websocket_url(),
     }
 
 
@@ -60,25 +62,33 @@ async def websocket_endpoint(client_ws: WebSocket):
     await client_ws.accept()
     logger.info("Client connected: %s", client_ws.client)
 
-    stt_url = f"ws://{settings.stt_host}:{settings.stt_port}/ws"
-    translator_url = f"ws://{settings.translator_host}:{settings.translator_port}/ws"
-    tts_url = f"ws://{settings.tts_host}:{settings.tts_port}{settings.tts_path}"
+    stt_url = settings.stt_websocket_url()
+    tts_url = settings.tts_websocket_url()
+    print(stt_url, '\n', tts_url)
 
     ref_audio_b64 = ""
     ref_text = ""
     tts_lang = settings.tts_default_lang
 
-    translated_stable = ""
+    display_stable = ""
     last_stt_stable = ""
-    translated_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    tts_text_queue: asyncio.Queue[str | None] = asyncio.Queue()
     shutdown_flag = asyncio.Event()
 
+    translation_session: TranslationSession | None = None
+    if settings.use_translator:
+        translation_session = TranslationSession(
+            api_key=settings.yandex_api_key,
+            folder_id=settings.yandex_folder_id,
+            source_language=settings.translator_source_language,
+            target_language=settings.translator_target_language,
+        )
+
     try:
-        stt_ws = await websockets.connect(stt_url, ping_interval=20, ping_timeout=10, close_timeout=5)
-        translator_ws = await websockets.connect(translator_url, ping_interval=20, ping_timeout=10, close_timeout=5)
-        tts_ws = await websockets.connect(tts_url, ping_interval=20, ping_timeout=10, close_timeout=5)
+        stt_ws = await websockets.connect(stt_url, ping_interval=20, ping_timeout=120, close_timeout=5)
+        tts_ws = await websockets.connect(tts_url, ping_interval=20, ping_timeout=120, close_timeout=5)
     except Exception as exc:
-        logger.exception("Failed to connect to downstream services")
+        logger.exception("Failed to connect to STT/TTS")
         await client_ws.send_json({"event": "error", "message": f"downstream unavailable: {exc}"})
         await client_ws.close(code=1011)
         return
@@ -105,7 +115,7 @@ async def websocket_endpoint(client_ws: WebSocket):
                         tts_lang = str(payload.get("lang") or settings.tts_default_lang)
                         continue
                     if event == "session_end":
-                        await translated_queue.put(None)
+                        await tts_text_queue.put(None)
                         continue
 
                 bytes_data = packet.get("bytes")
@@ -117,13 +127,13 @@ async def websocket_endpoint(client_ws: WebSocket):
             logger.exception("client_to_stt failed")
         finally:
             shutdown_flag.set()
-            await translated_queue.put(None)
+            await tts_text_queue.put(None)
 
-    async def stt_translate_pipeline():
-        nonlocal translated_stable, last_stt_stable
+    async def stt_pipeline():
+        nonlocal display_stable, last_stt_stable
         try:
             while not shutdown_flag.is_set():
-                msg = await asyncio.wait_for(stt_ws.recv(), timeout=30.0)
+                msg = await asyncio.wait_for(stt_ws.recv(), timeout=120.0)
                 if not isinstance(msg, str):
                     continue
 
@@ -132,50 +142,56 @@ async def websocket_endpoint(client_ws: WebSocket):
                 except json.JSONDecodeError:
                     continue
 
-                stable_ru = (stt_data.get("stable") or "").strip()
-                pending_ru = (stt_data.get("pending") or "").strip()
-
-                new_ru_chunk = _new_suffix(stable_ru, last_stt_stable)
-                if new_ru_chunk:
-                    await translator_ws.send(new_ru_chunk)
-                    translated_chunk_resp = await asyncio.wait_for(translator_ws.recv(), timeout=30.0)
-                    translated_chunk = ""
-                    if isinstance(translated_chunk_resp, str):
+                stable_src = (stt_data.get("stable") or "").strip()
+                pending_src = (stt_data.get("pending") or "").strip()
+                new_piece = _new_suffix(stable_src, last_stt_stable)
+                if new_piece:
+                    if translation_session is not None:
                         try:
-                            translated_chunk = json.loads(translated_chunk_resp).get("translation", "").strip()
-                        except json.JSONDecodeError:
-                            translated_chunk = translated_chunk_resp.strip()
-                    if translated_chunk:
-                        translated_stable = f"{translated_stable} {translated_chunk}".strip()
-                        await translated_queue.put(translated_chunk)
+                            tts_chunk = await asyncio.to_thread(
+                                translation_session.translate_chunk,
+                                new_piece,
+                            )
+                        except Exception:
+                            logger.exception("in-process translation failed")
+                            tts_chunk = ""
+                        tts_chunk = (tts_chunk or "").strip()
+                        if tts_chunk:
+                            display_stable = f"{display_stable} {tts_chunk}".strip()
+                            await tts_text_queue.put(tts_chunk)
+                    else:
+                        tts_chunk = new_piece
+                        display_stable = stable_src
+                        await tts_text_queue.put(tts_chunk)
 
-                last_stt_stable = stable_ru
+                last_stt_stable = stable_src
 
                 await client_ws.send_text(
                     json.dumps(
                         {
                             "event": "translation",
-                            "stable": translated_stable,
-                            "pending": pending_ru,
-                            "source_stable": stable_ru,
-                            "source_pending": pending_ru,
-                            "chars": len(translated_stable),
+                            "stable": display_stable,
+                            "pending": pending_src,
+                            "source_stable": stable_src,
+                            "source_pending": pending_src,
+                            "chars": len(display_stable),
                             "speed_logs": stt_data.get("speed_logs", ""),
                             "task": stt_data.get("task", "translate"),
-                            "lang": "en",
+                            "lang": "en" if (stt_data.get("task") == "translate") else stt_data.get("lang", "ru"),
+                            "through_translator": bool(settings.use_translator),
                         },
                         ensure_ascii=False,
                     )
                 )
         except asyncio.TimeoutError:
-            logger.info("stt_translate_pipeline timeout")
+            logger.info("stt pipeline timeout")
         except ConnectionClosed:
             logger.info("stt connection closed")
         except Exception:
-            logger.exception("stt_translate_pipeline failed")
+            logger.exception("stt_pipeline failed")
         finally:
             shutdown_flag.set()
-            await translated_queue.put(None)
+            await tts_text_queue.put(None)
 
     async def tts_sender():
         try:
@@ -191,7 +207,7 @@ async def websocket_endpoint(client_ws: WebSocket):
             )
             seq = 0
             while not shutdown_flag.is_set():
-                text_chunk = await translated_queue.get()
+                text_chunk = await tts_text_queue.get()
                 if text_chunk is None:
                     break
                 await tts_ws.send(json.dumps({"event": "chunk", "seq": seq, "text": text_chunk}))
@@ -227,7 +243,7 @@ async def websocket_endpoint(client_ws: WebSocket):
 
     tasks = [
         asyncio.create_task(client_to_stt()),
-        asyncio.create_task(stt_translate_pipeline()),
+        asyncio.create_task(stt_pipeline()),
         asyncio.create_task(tts_sender()),
         asyncio.create_task(tts_to_client()),
     ]
@@ -240,7 +256,7 @@ async def websocket_endpoint(client_ws: WebSocket):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        for ws in [stt_ws, translator_ws, tts_ws]:
+        for ws in [stt_ws, tts_ws]:
             try:
                 await ws.close()
             except Exception:

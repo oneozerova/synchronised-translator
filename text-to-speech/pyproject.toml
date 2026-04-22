@@ -1,0 +1,14 @@
+[project]
+name = "text-to-speech"
+version = "0.1.0"
+description = "Streaming Qwen3-TTS over WebSocket"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.0",
+    "pydantic-settings>=2.13.1",
+    "numpy>=2.4.4",
+    "soundfile>=0.13.1",
+    "torch>=2.11.0",
+    "uvicorn>=0.44.0",
+    # `faster_qwen3_tts` ставится вручную из окружения/репозитория модели (см. README в корне).
+]
