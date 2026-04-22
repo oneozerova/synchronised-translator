@@ -93,6 +93,8 @@ app = FastAPI(title="Streaming TTS API", lifespan=lifespan)
 # ─── Утилиты ──────────────────────────────────────────────────────────────────
 
 def _decode_base64_wav_to_temp_file(audio_b64: str) -> str:
+    if not audio_b64:
+        return _get_warmup_audio()
     audio_bytes = base64.b64decode(audio_b64)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         f.write(audio_bytes)

@@ -68,8 +68,8 @@ def last_n_tokens(text: str, max_tokens: int) -> str:
 
 @dataclass
 class TranslationSession:
-    source_language: str = "English"
-    target_language: str = "Russian"
+    source_language: str = "Russian"
+    target_language: str = "English"
     max_context_tokens: int = 300
 
     full_source_text: str = ""
