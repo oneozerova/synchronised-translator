@@ -17,7 +17,7 @@ class VADProcessor:
         except Exception:
             model, _ = torch.hub.load(
                 repo_or_dir='snakers4/silero-vad', model='silero_vad',
-                force_reload=False, verbose=False
+                force_reload=False, verbose=False, trust_repo=True
             )
             return model
 

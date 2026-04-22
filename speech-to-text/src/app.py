@@ -7,7 +7,12 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Live Translator + TTS", page_icon="🎧")
 st.title("🎧 Live Translator + TTS")
 st.caption("Аудио -> STT -> Перевод -> TTS (воспроизведение в реальном времени)")
+model_choice = st.selectbox(
+    "STT модель",
+    ["whisper-small", "voxtral"],
+)
 
+MODEL = {json.dumps(model_choice)}
 WS_URL = "ws://0.0.0.0:8000/ws"
 
 uploaded = st.file_uploader(
@@ -24,6 +29,8 @@ ref_text_value = st.text_input(
     "Референсная фраза для TTS",
     value="Это тестовая референсная фраза.",
 )
+
+
 
 audio_b64 = ""
 audio_mime = ""
@@ -86,6 +93,7 @@ const HAS_FILE = {str(bool(audio_b64)).lower()};
 const AUDIO_B64 = {json.dumps(audio_b64)};
 const REF_AUDIO_B64 = {json.dumps(ref_audio_b64)};
 const REF_TEXT = {json.dumps(ref_text_value)};
+const MODEL = {json.dumps(model_choice)};
 
 const INPUT_SAMPLE_RATE = 16000;
 const CHUNK_SEC = 0.25;
@@ -232,7 +240,8 @@ async function start() {{
 
   ws.onopen = async () => {{
     ws.send(JSON.stringify({{
-      event: "tts_start",
+      event: "start",
+      model: MODEL,
       ref_audio: REF_AUDIO_B64 || "",
       ref_text: REF_TEXT || "",
       lang: "Russian",

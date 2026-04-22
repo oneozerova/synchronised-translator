@@ -8,12 +8,27 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from faster_whisper import WhisperModel
 from src.VAD_processing import VADProcessor
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 VAD_THRESHOLD = 0.75
 
-model = WhisperModel("small", device="cuda", compute_type="int8_float16") # ДЛЯ ЗАПУСКА НА GPU
-# model = WhisperModel("base", device="cpu", compute_type="int8") # ДЛЯ ЛОКАЛЬНОГО ЗАПУСКА НА CPU
+# model = WhisperModel("small", device="cuda", compute_type="int8_float16") # ДЛЯ ЗАПУСКА НА GPU
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = WhisperModel("base", device=device, compute_type="int8") # ДЛЯ ЛОКАЛЬНОГО ЗАПУСКА НА CPU
+
 vad = VADProcessor(device="cuda")
+
+vox_processor = AutoProcessor.from_pretrained(
+    "mistralai/Voxtral-Mini-4B-Realtime-2602"
+)
+
+vox_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    "mistralai/Voxtral-Mini-4B-Realtime-2602",
+    torch_dtype=torch.float16,
+).to(device)
+
+vox_model.eval()
 
 from collections import Counter
 
@@ -42,7 +57,7 @@ def has_ngram_loop(words, n=3):
     ngrams = [tuple(words[i:i+n]) for i in range(len(words) - n + 1)]
     return Counter(ngrams).most_common(1)[0][1] > 2
 
-def transcribe(audio, prompt=""):
+def transcribe_whisper(audio, prompt=""):
     segments, _ = model.transcribe(
         audio,
         task="transcribe",
@@ -67,6 +82,36 @@ def transcribe(audio, prompt=""):
                 words.append((token, w.end))
     return words
 
+def transcribe_voxtral(audio, prompt=""):
+    inputs = vox_processor(
+        audio,
+        sampling_rate=16000,
+        return_tensors="pt"
+    )
+
+    input_features = inputs.input_features.to(device)
+
+    with torch.no_grad():
+        generated_ids = vox_model.generate(
+            input_features,
+            max_new_tokens=128,
+            do_sample=False,
+        )
+
+    text = vox_processor.batch_decode(
+        generated_ids,
+        skip_special_tokens=True
+    )[0].strip()
+
+    if not text:
+        return []
+
+    words = text.split()
+
+    duration = len(audio) / SAMPLE_RATE
+    step = duration / max(len(words), 1)
+
+    return [(w, (i + 1) * step) for i, w in enumerate(words)]
 
 SAMPLE_RATE = 16000
 SILENCE_TIMEOUT = 0.6
@@ -147,8 +192,24 @@ async def health():
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     await websocket.accept()
+
+    # ---------- выбираем модель ----------
+    init_raw = await websocket.receive_text()
+    init_data = json.loads(init_raw)
+
+    model_name = init_data.get("model", "whisper-small")
+    print(f"Using STT model: {model_name}")
+
     queue: asyncio.Queue = asyncio.Queue()
 
+    # ---------- unified transcribe ----------
+    def transcribe_unified(audio, prompt=""):
+        if model_name == "voxtral":
+            return transcribe_voxtral(audio, prompt)
+        else:
+            return transcribe_whisper(audio, prompt)
+
+    # ---------- receiver ----------
     async def receiver():
         try:
             while True:
@@ -157,69 +218,96 @@ async def ws(websocket: WebSocket):
         except WebSocketDisconnect:
             await queue.put(None)
 
+    # ---------- processor ----------
     async def processor():
-        # ── FIX 3: ring-buffer вместо concat+slice ──
         audio_ring = AudioRingBuffer(WINDOW + OVERLAP)
+
         committed = []
         last_candidates = []
+
         SAFE_MARGIN = 0.7
-        last_voice = time.monotonic()   # FIX: monotonic точнее для интервалов
+        STABILITY_THRESHOLD = 2
+
+        word_seen = {}
+        word_count = {}
+
+        last_voice = time.monotonic()
         loop = asyncio.get_event_loop()
 
-        STABILITY_THRESHOLD = 2
-        word_seen: dict[int, str] = {}
-        word_count: dict[int, int] = {}
-
         while True:
-            # ── FIX 1: измеряем время ПОСЛЕ получения чанка ──────────────────
             raw = await queue.get()
             if raw is None:
                 break
+
             full_time_start = time.monotonic()
-            # ─────────────────────────────────────────────────────────────────
 
             chunk = np.frombuffer(raw, dtype=np.float32)
-            now = time.monotonic()
-
             chunk = preprocess_audio(chunk)
 
-            # ── FIX 2: VAD в executor, чтобы не блокировать event loop ───────
             speech_chunk, speech = await loop.run_in_executor(
-                None, vad.extract_speech_float32, chunk, VAD_THRESHOLD
+                None,
+                vad.extract_speech_float32,
+                chunk,
+                VAD_THRESHOLD,
             )
-            # ─────────────────────────────────────────────────────────────────
 
             pending = []
 
             if speech:
-                # FIX 3: ring-buffer
                 audio_ring.append(speech_chunk)
                 audio_window = audio_ring.get()
 
-                last_voice = now
+                last_voice = time.monotonic()
+
                 model_processing_start = time.monotonic()
+
                 word_times = await loop.run_in_executor(
-                    None, partial(transcribe, audio_window, build_prompt(committed))
+                    None,
+                    partial(
+                        transcribe_unified,
+                        audio_window,
+                        build_prompt(committed),
+                    ),
                 )
+
                 model_processing_end = time.monotonic()
 
                 if not word_times:
                     full_time_end = time.monotonic()
-                    _log(websocket, committed, pending, full_time_start,
-                         full_time_end, None, None, speech)
+                    await _log(
+                        websocket,
+                        committed,
+                        pending,
+                        full_time_start,
+                        full_time_end,
+                        model_processing_start,
+                        model_processing_end,
+                        speech,
+                    )
                     continue
 
                 all_words = [w for w, _ in word_times]
+
                 if is_hallucinating(all_words) or has_ngram_loop(all_words):
-                    print("⚠️ Hallucination detected, resetting window")
+                    print("Hallucination detected, reset")
                     audio_ring.trim_to(OVERLAP)
                     vad.reset_states()
                     word_seen.clear()
                     word_count.clear()
                     last_candidates = []
+
                     full_time_end = time.monotonic()
-                    _log(websocket, committed, pending, full_time_start,
-                         full_time_end, model_processing_start, model_processing_end, speech)
+
+                    await _log(
+                        websocket,
+                        committed,
+                        pending,
+                        full_time_start,
+                        full_time_end,
+                        model_processing_start,
+                        model_processing_end,
+                        speech,
+                    )
                     continue
 
                 audio_duration = len(audio_window) / SAMPLE_RATE
@@ -244,30 +332,41 @@ async def ws(websocket: WebSocket):
                             word_seen.pop(abs_pos, None)
                             word_count.pop(abs_pos, None)
 
-                pending = [w for w, t in word_times
-                           if audio_duration - t <= SAFE_MARGIN]
+                pending = [
+                    w for w, t in word_times
+                    if audio_duration - t <= SAFE_MARGIN
+                ]
+
                 last_candidates = all_words
 
             else:
-                print("SKIP (VAD)")
-                if now - last_voice > SILENCE_TIMEOUT:
+                if time.monotonic() - last_voice > SILENCE_TIMEOUT:
                     if last_candidates:
                         for w in last_candidates[-PENDING_WORDS:]:
                             if w not in committed:
                                 committed.append(w)
+
                     last_candidates = []
                     audio_ring.trim_to(OVERLAP)
                     vad.reset_states()
                     word_seen.clear()
                     word_count.clear()
-                model_processing_start = model_processing_end = None
+
+                model_processing_start = None
+                model_processing_end = None
 
             full_time_end = time.monotonic()
-            await _log(websocket, committed, pending,
-                       full_time_start, full_time_end,
-                       model_processing_start if speech else None,
-                       model_processing_end if speech else None,
-                       speech)
+
+            await _log(
+                websocket,
+                committed,
+                pending,
+                full_time_start,
+                full_time_end,
+                model_processing_start,
+                model_processing_end,
+                speech,
+            )
 
     await asyncio.gather(receiver(), processor())
 
