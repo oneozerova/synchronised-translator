@@ -10,3 +10,4 @@ transformers
 pydantic_settings
 faster_qwen3_tts
 soudfile
+deepfilternet
