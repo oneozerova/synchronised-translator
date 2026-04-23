@@ -1048,7 +1048,6 @@ let inputCtx = null;
 let micStream = null;
 let micSrc = null;
 let processor = null;
-let inputBuf = [];
 let pendingTimer = null;
 
 let playbackCtx = null;
@@ -1090,6 +1089,43 @@ const setupRecordBtn = document.getElementById("setup-record-btn");
 const chooseUploadBtn = document.getElementById("choose-upload");
 const chooseRecordBtn = document.getElementById("choose-record");
 const setupBackBtn = document.getElementById("setup-back");
+
+/* ─────────────────────────────────────────────
+   ИСПРАВЛЕНИЕ 1: Float32 → Int16 PCM конвертация
+   (аналог floatTo16BitPCM из рабочего HTML-клиента)
+───────────────────────────────────────────── */
+function floatTo16BitPCM(float32Array) {{
+  const buffer = new ArrayBuffer(float32Array.length * 2);
+  const view = new DataView(buffer);
+  for (let i = 0; i < float32Array.length; i++) {{
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }}
+  return buffer;
+}}
+
+/* ─────────────────────────────────────────────
+   ИСПРАВЛЕНИЕ 2: downsample с нативной частоты до 16k
+   (аналог downsampleBuffer из рабочего HTML-клиента)
+───────────────────────────────────────────── */
+function downsampleBuffer(buffer, inputRate, outputRate) {{
+  if (outputRate === inputRate) return buffer;
+  const ratio = inputRate / outputRate;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  let offsetBuffer = 0;
+  for (let i = 0; i < newLength; i++) {{
+    const nextOffsetBuffer = Math.round((i + 1) * ratio);
+    let accum = 0, count = 0;
+    for (let j = offsetBuffer; j < nextOffsetBuffer && j < buffer.length; j++) {{
+      accum += buffer[j];
+      count++;
+    }}
+    result[i] = count > 0 ? accum / count : 0;
+    offsetBuffer = nextOffsetBuffer;
+  }}
+  return result;
+}}
 
 function setVisibility(el, visible) {{
   if (!el) return;
@@ -1233,16 +1269,30 @@ async function requestMicrophoneStream() {{
   }});
 }}
 
+/* ─────────────────────────────────────────────
+   ИСПРАВЛЕНИЕ 3: openMicrophoneCapture
+   - AudioContext без принудительного sampleRate (нативная частота браузера)
+   - downsample до 16k внутри onaudioprocess
+   - конвертация Float32 → Int16 PCM перед вызовом onChunk
+   - onChunk теперь получает ArrayBuffer (готовый PCM16), а не Float32Array
+───────────────────────────────────────────── */
 async function openMicrophoneCapture(onChunk) {{
   const stream = await requestMicrophoneStream();
-  const ctx = new AudioContext({{ sampleRate: SAMPLE_RATE }});
+  // Используем нативную частоту браузера, как в рабочем HTML-клиенте
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const source = ctx.createMediaStreamSource(stream);
   const processorNode = ctx.createScriptProcessor(4096, 1, 1);
 
   processorNode.onaudioprocess = (event) => {{
-    const data = new Float32Array(event.inputBuffer.getChannelData(0));
-    pushVoiceLevel(measureFloat32Level(data));
-    onChunk(data);
+    const input = event.inputBuffer.getChannelData(0);
+    // Шаг 1: downsample с нативной частоты до 16000
+    const downsampled = downsampleBuffer(input, ctx.sampleRate, SAMPLE_RATE);
+    // Шаг 2: измерить уровень до конвертации
+    pushVoiceLevel(measureFloat32Level(downsampled));
+    // Шаг 3: конвертировать Float32 → Int16 PCM (little-endian)
+    const pcm16Buffer = floatTo16BitPCM(downsampled);
+    // Передаём ArrayBuffer — бэкенд ожидает именно этот формат
+    onChunk(pcm16Buffer);
   }};
 
   source.connect(processorNode);
@@ -1266,14 +1316,22 @@ async function closeMicrophoneCapture(capture) {{
 
 async function startReferenceRecording() {{
   refRecorderChunks = [];
-  refRecorderCapture = await openMicrophoneCapture((data) => {{
+  // Для записи референса собираем Float32 чанки (потом энкодим в WAV вручную)
+  const stream = await requestMicrophoneStream();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = ctx.createMediaStreamSource(stream);
+  const processorNode = ctx.createScriptProcessor(4096, 1, 1);
+
+  processorNode.onaudioprocess = (event) => {{
+    const data = new Float32Array(event.inputBuffer.getChannelData(0));
     refRecorderChunks.push(data);
-  }});
-  refRecorderStream = refRecorderCapture.stream;
-  refRecorderCtx = refRecorderCapture.ctx;
-  refRecorderSource = refRecorderCapture.source;
-  refRecorderProcessor = refRecorderCapture.processor;
-  refRecorderSampleRate = SAMPLE_RATE;
+  }};
+
+  source.connect(processorNode);
+  processorNode.connect(ctx.destination);
+
+  refRecorderCapture = {{ stream, ctx, source, processor: processorNode }};
+  refRecorderSampleRate = ctx.sampleRate;
 
   refRecorderActive = true;
   setupRecordBtn.classList.add("recording");
@@ -1481,6 +1539,9 @@ function b64ToBytes(b64) {{
   return arr;
 }}
 
+/* ─────────────────────────────────────────────
+   ИСПРАВЛЕНИЕ 4: streamFile — Float32 → PCM16 перед отправкой
+───────────────────────────────────────────── */
 async function streamFile() {{
   setModeLabel("Файл");
   setStatus(
@@ -1490,7 +1551,7 @@ async function streamFile() {{
   );
 
   const bytes = b64ToBytes(AUDIO_B64);
-  const decCtx = new AudioContext();
+  const decCtx = new (window.AudioContext || window.webkitAudioContext)();
   const decoded = await decCtx.decodeAudioData(bytes.buffer.slice(0));
   const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * SAMPLE_RATE), SAMPLE_RATE);
   const src = offline.createBufferSource();
@@ -1511,7 +1572,11 @@ async function streamFile() {{
   for (let i = 0; i < samples.length && recording; i += chunkN) {{
     const chunk = new Float32Array(samples.subarray(i, Math.min(i + chunkN, samples.length)));
     pushVoiceLevel(measureFloat32Level(chunk));
-    if (ws?.readyState === WebSocket.OPEN) ws.send(chunk.buffer);
+    if (ws?.readyState === WebSocket.OPEN) {{
+      // Конвертируем Float32 → Int16 PCM перед отправкой
+      const pcm16Buffer = floatTo16BitPCM(chunk);
+      ws.send(pcm16Buffer);
+    }}
     await new Promise((resolve) => setTimeout(resolve, CHUNK_SEC * 1000));
   }}
 
@@ -1525,16 +1590,16 @@ async function streamFile() {{
   }}
 }}
 
+/* ─────────────────────────────────────────────
+   ИСПРАВЛЕНИЕ 5: startMic — onChunk теперь получает ArrayBuffer (PCM16),
+   буферизация Float32 больше не нужна, отправляем напрямую
+───────────────────────────────────────────── */
 async function startMic() {{
   setModeLabel("Микрофон");
-  const chunkN = Math.floor(SAMPLE_RATE * CHUNK_SEC);
 
-  const capture = await openMicrophoneCapture((data) => {{
-    inputBuf.push(...data);
-    while (inputBuf.length >= chunkN) {{
-      const chunk = new Float32Array(inputBuf.splice(0, chunkN));
-      if (ws?.readyState === WebSocket.OPEN) ws.send(chunk.buffer);
-    }}
+  const capture = await openMicrophoneCapture((pcm16Buffer) => {{
+    // pcm16Buffer — уже готовый ArrayBuffer с Int16 PCM
+    if (ws?.readyState === WebSocket.OPEN) ws.send(pcm16Buffer);
   }});
 
   micStream = capture.stream;
@@ -1593,8 +1658,10 @@ async function start() {{
     }}
 
     if ((payload.event === "translation" || payload.stable !== undefined) && payload.stable !== undefined) {{
-      setTranscript(payload.stable, payload.pending || "");
-      updateStats(payload.stable, payload.pending || "", payload.speed_logs || "");
+      // Объединяем stable + pending — весь входящий текст сразу коммитится как основной
+      const fullText = [payload.stable, payload.pending].filter(Boolean).join(" ").trim();
+      setTranscript(fullText, "");
+      updateStats(fullText, "", payload.speed_logs || "");
       if (payload.lang) document.getElementById("badge-lang").textContent = String(payload.lang).toUpperCase();
       return;
     }}
@@ -1650,7 +1717,6 @@ function stop() {{
     "",
     "Новые аудиоданные больше не отправляются. Если backend ещё дорабатывает хвост, текст может обновиться."
   );
-  inputBuf = [];
 
   clearTimeout(pendingTimer);
   if (processor) processor.disconnect();
