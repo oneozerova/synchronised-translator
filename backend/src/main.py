@@ -19,9 +19,10 @@ app = FastAPI()
 logger = logging.getLogger("backend-orchestrator")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-TTS_BUFFER_TARGET_WORDS = 8
-TTS_BUFFER_MIN_WORDS = 4
-TTS_BUFFER_IDLE_FLUSH_SEC = 1.4
+TTS_BUFFER_TARGET_WORDS = 6
+TTS_BUFFER_MIN_WORDS = 3
+TTS_BUFFER_IDLE_FLUSH_SEC = 0.8
+TTS_BUFFER_MAX_WAIT_SEC = 1.6
 TTS_SENTENCE_END_RE = re.compile(r"[.!?…]+[\"')\]]*$")
 TTS_CLAUSE_END_RE = re.compile(r"[,;:]+[\"')\]]*$")
 TTS_EN_PAUSE_WORDS = {
@@ -70,7 +71,12 @@ def _word_count(text: str) -> int:
     return len([w for w in text.split() if w])
 
 
-def _should_flush_tts_buffer(buffer_text: str, pending_src: str, idle_for_sec: float) -> bool:
+def _should_flush_tts_buffer(
+    buffer_text: str,
+    pending_src: str,
+    idle_for_sec: float,
+    buffer_age_sec: float,
+) -> bool:
     cleaned = buffer_text.strip()
     if not cleaned:
         return False
@@ -84,9 +90,11 @@ def _should_flush_tts_buffer(buffer_text: str, pending_src: str, idle_for_sec: f
         return True
 
     last_word = re.sub(r"[^\w]+$", "", cleaned.split()[-1].lower())
-    if words >= TTS_BUFFER_TARGET_WORDS - 1 and last_word in TTS_EN_PAUSE_WORDS and not pending_src:
+    if words >= TTS_BUFFER_TARGET_WORDS - 1 and last_word in TTS_EN_PAUSE_WORDS:
         return True
-    if words >= TTS_BUFFER_MIN_WORDS and idle_for_sec >= TTS_BUFFER_IDLE_FLUSH_SEC and not pending_src:
+    if words >= TTS_BUFFER_MIN_WORDS and idle_for_sec >= TTS_BUFFER_IDLE_FLUSH_SEC:
+        return True
+    if words >= 2 and buffer_age_sec >= TTS_BUFFER_MAX_WAIT_SEC:
         return True
     return False
 
@@ -124,6 +132,7 @@ async def websocket_endpoint(client_ws: WebSocket):
     last_stt_stable: str = ""
     tts_buffer: str = ""
     tts_buffer_updated_at = time.monotonic()
+    tts_buffer_started_at = time.monotonic()
     tts_text_queue: asyncio.Queue[str | None] = asyncio.Queue()
     shutdown_flag = asyncio.Event()
 
@@ -190,7 +199,7 @@ async def websocket_endpoint(client_ws: WebSocket):
             await tts_text_queue.put(None)
 
     async def stt_pipeline() -> None:
-        nonlocal display_stable, last_stt_stable, tts_buffer, tts_buffer_updated_at
+        nonlocal display_stable, last_stt_stable, tts_buffer, tts_buffer_updated_at, tts_buffer_started_at
         try:
             while not shutdown_flag.is_set():
                 msg = await asyncio.wait_for(stt_ws.recv(), timeout=120.0)
@@ -221,20 +230,26 @@ async def websocket_endpoint(client_ws: WebSocket):
                         tts_chunk = (tts_chunk or "").strip()
                         if tts_chunk:
                             # ИСПРАВЛЕНИЕ 2: накапливаем переведённый текст
+                            if not tts_buffer:
+                                tts_buffer_started_at = time.monotonic()
                             display_stable = f"{display_stable} {tts_chunk}".strip()
                             tts_buffer = f"{tts_buffer} {tts_chunk}".strip()
                             tts_buffer_updated_at = time.monotonic()
                     else:
                         # ИСПРАВЛЕНИЕ 2: накапливаем оригинальный текст (не перезаписываем)
+                        if not tts_buffer:
+                            tts_buffer_started_at = time.monotonic()
                         display_stable = f"{display_stable} {new_piece}".strip()
                         tts_buffer = f"{tts_buffer} {new_piece}".strip()
                         tts_buffer_updated_at = time.monotonic()
 
                 idle_for_sec = time.monotonic() - tts_buffer_updated_at
-                if _should_flush_tts_buffer(tts_buffer, pending_src, idle_for_sec):
+                buffer_age_sec = time.monotonic() - tts_buffer_started_at
+                if _should_flush_tts_buffer(tts_buffer, pending_src, idle_for_sec, buffer_age_sec):
                     await tts_text_queue.put(tts_buffer.strip())
                     tts_buffer = ""
                     tts_buffer_updated_at = time.monotonic()
+                    tts_buffer_started_at = tts_buffer_updated_at
 
                 last_stt_stable = stable_src
 
