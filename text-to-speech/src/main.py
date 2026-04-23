@@ -70,12 +70,6 @@ async def lifespan(_app: FastAPI):
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype=DTYPE,
     )
-    
-    prompt_items = _model.create_voice_clone_prompt(
-        ref_audio=ref_audio,
-        ref_text=ref_text,
-        x_vector_only_mode=False,
-    )
 
     warmup_path: str | None = None
     try:
