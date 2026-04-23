@@ -9,9 +9,21 @@
 import base64
 import html
 import json
+from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+
+REFERENCE_AUDIO_DIR = Path(__file__).resolve().parent / "reference_audio"
+REFERENCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+CURRENT_REFERENCE_WAV = REFERENCE_AUDIO_DIR / "current_reference.wav"
+
+
+def save_reference_wav(filename: str, data: bytes) -> Path:
+    path = REFERENCE_AUDIO_DIR / filename
+    path.write_bytes(data)
+    return path
 
 st.set_page_config(page_title="Speech Translator", page_icon="🎙️", layout="wide")
 
@@ -223,6 +235,23 @@ with controls_right:
         value="Это тестовая референсная фраза.",
     )
 
+if "ref_mode" not in st.session_state:
+    st.session_state.ref_mode = None
+if "saved_reference_path" not in st.session_state:
+    st.session_state.saved_reference_path = None
+if "saved_reference_source" not in st.session_state:
+    st.session_state.saved_reference_source = None
+
+st.markdown("### Шаг 1. Выберите источник референсного голоса")
+ref_choice_left, ref_choice_right = st.columns(2, gap="large")
+with ref_choice_left:
+    if st.button("Выбрать референсное аудио", use_container_width=True):
+        st.session_state.ref_mode = "upload"
+with ref_choice_right:
+    if st.button("Записать аудио сейчас", use_container_width=True):
+        st.session_state.ref_mode = "record"
+
+recorded_ref = None
 with st.expander("Источник аудио и настройки голоса", expanded=True):
     uploads_left, uploads_right = st.columns(2, gap="large")
     with uploads_left:
@@ -232,21 +261,30 @@ with st.expander("Источник аудио и настройки голоса
             help="Если файл не выбран, интерфейс будет слушать микрофон.",
         )
     with uploads_right:
-        ref_uploaded = st.file_uploader(
-            "Референсное аудио для TTS",
-            type=["wav"],
-            help="Необязательно. Если не выбрать, будет использован голос по умолчанию.",
-        )
-
-st.markdown(
-    """
-<div class="section-note">
-  Нажмите кнопку запуска ниже и начните говорить. Текст остаётся основным результатом,
-  озвучка и анимация работают поверх той же логики websocket.
-</div>
-""",
-    unsafe_allow_html=True,
-)
+        if st.session_state.ref_mode == "upload":
+            ref_uploaded = st.file_uploader(
+                "Референсное аудио для TTS",
+                type=["wav"],
+                help="Файл будет сохранён как WAV в папку frontend/reference_audio.",
+                key="ref_uploaded_wav",
+            )
+        elif st.session_state.ref_mode == "record":
+            st.markdown(
+                """
+Скажите три предложения для записи:
+1. `Какая сегодня погода в Москве?`
+2. `Супер, я получил оффер в Яндекс!`
+3. `Вот, что я хочу рассказать, внимательно слушай.`
+"""
+            )
+            ref_uploaded = None
+            recorded_ref = st.audio_input(
+                "Нажмите и запишите референсный голос",
+                key="recorded_reference_audio",
+            )
+        else:
+            ref_uploaded = None
+            st.caption("Сначала выберите один из двух вариантов выше.")
 
 audio_b64 = ""
 audio_name = "Микрофон"
@@ -256,9 +294,56 @@ if uploaded is not None:
 
 ref_audio_b64 = ""
 ref_audio_name = "Голос по умолчанию"
-if ref_uploaded is not None:
-    ref_audio_b64 = base64.b64encode(ref_uploaded.getvalue()).decode("ascii")
+saved_reference_path = None
+if st.session_state.ref_mode == "upload" and ref_uploaded is not None:
+    ref_bytes = ref_uploaded.getvalue()
+    saved_reference_path = save_reference_wav("uploaded_reference.wav", ref_bytes)
+    ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
     ref_audio_name = ref_uploaded.name
+    st.session_state.saved_reference_path = str(saved_reference_path)
+    st.session_state.saved_reference_source = "Загруженный WAV"
+elif st.session_state.ref_mode == "record" and recorded_ref is not None:
+    ref_bytes = recorded_ref.getvalue()
+    saved_reference_path = save_reference_wav("recorded_reference.wav", ref_bytes)
+    ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
+    ref_audio_name = "recorded_reference.wav"
+    st.session_state.saved_reference_path = str(saved_reference_path)
+    st.session_state.saved_reference_source = "Записанный голос"
+elif st.session_state.saved_reference_path:
+    saved_reference_path = Path(st.session_state.saved_reference_path)
+    if saved_reference_path.exists():
+        ref_bytes = saved_reference_path.read_bytes()
+        ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
+        ref_audio_name = saved_reference_path.name
+
+if saved_reference_path is not None and saved_reference_path.exists():
+    st.info(
+        "Референсный голос сохранён: "
+        f"{saved_reference_path} "
+        f"({st.session_state.saved_reference_source or 'Референс'})"
+    )
+
+if not ref_audio_b64:
+    st.markdown(
+        """
+<div class="section-note">
+  Сейчас продиктованный голос не используется, пока его не записать или не загрузить.
+  После подготовки референса основной экран перевода появится ниже автоматически.
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+st.markdown(
+    """
+<div class="section-note">
+  Референсный голос уже сохранён как `.wav`. Ниже открывается основной экран перевода,
+  и backend получает именно этот сохранённый референс.
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 audio_label = html.escape(audio_name)
 ref_audio_label = html.escape(ref_audio_name)
@@ -308,6 +393,164 @@ components.html(
     box-shadow: 0 16px 36px rgba(0, 0, 0, 0.10);
     overflow: hidden;
     min-height: auto;
+  }}
+  .is-hidden {{
+    display: none !important;
+  }}
+  .setup-screen {{
+    padding: 30px 24px 24px;
+  }}
+  .setup-shell {{
+    border-radius: 24px;
+    background: rgba(255, 248, 242, 0.72);
+    border: 1px solid rgba(0, 0, 0, 0.10);
+    padding: 28px 24px;
+  }}
+  .setup-eyebrow {{
+    margin: 0 0 10px 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: rgba(0, 0, 0, 0.62);
+  }}
+  .setup-title {{
+    margin: 0 0 12px 0;
+    font-size: 34px;
+    line-height: 1.02;
+    letter-spacing: -0.03em;
+  }}
+  .setup-copy {{
+    margin: 0 0 18px 0;
+    max-width: 760px;
+    font-size: 15px;
+    line-height: 1.6;
+  }}
+  .setup-grid {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 18px;
+  }}
+  .setup-option {{
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 18px 18px 16px;
+    border-radius: 20px;
+    background: rgba(255,255,255,0.34);
+    border: 1px solid rgba(121, 157, 255, 0.34);
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  }}
+  .setup-option:hover {{
+    transform: translateY(-1px);
+    box-shadow: 0 12px 24px rgba(121, 157, 255, 0.18);
+    border-color: rgba(121, 157, 255, 0.58);
+  }}
+  .setup-option strong {{
+    display: block;
+    margin-bottom: 8px;
+    font-size: 18px;
+    line-height: 1.2;
+    color: #000000;
+  }}
+  .setup-option span {{
+    display: block;
+    color: rgba(0, 0, 0, 0.82);
+    font-size: 14px;
+    line-height: 1.55;
+  }}
+  .setup-footer {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+  }}
+  .setup-note {{
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: rgba(0, 0, 0, 0.72);
+  }}
+  .setup-note.error {{
+    color: #b94a48;
+  }}
+  .setup-pill {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.34);
+    border: 1px solid rgba(0,0,0,0.10);
+    font-size: 13px;
+  }}
+  .setup-pill b {{
+    font-weight: 700;
+  }}
+  .record-phrases {{
+    display: grid;
+    gap: 10px;
+    margin: 0 0 18px 0;
+  }}
+  .phrase {{
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(255,255,255,0.34);
+    border: 1px solid rgba(0,0,0,0.10);
+    font-size: 16px;
+    line-height: 1.5;
+  }}
+  .setup-actions {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }}
+  .choice-btn,
+  .ghost-btn {{
+    padding: 14px 18px;
+    border-radius: 16px;
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+  }}
+  .choice-btn {{
+    background: #799DFF;
+    color: #000000;
+    box-shadow: 0 14px 28px rgba(121, 157, 255, 0.26);
+  }}
+  .choice-btn:hover {{
+    transform: translateY(-1px);
+    box-shadow: 0 18px 32px rgba(121, 157, 255, 0.32);
+  }}
+  .ghost-btn {{
+    background: rgba(255,255,255,0.28);
+    color: #000000;
+    border: 1px solid rgba(0,0,0,0.12);
+  }}
+  .ghost-btn:hover {{
+    background: rgba(121, 157, 255, 0.20);
+    border-color: rgba(121, 157, 255, 0.50);
+  }}
+  .choice-btn.recording {{
+    background: #b94a48;
+    box-shadow: 0 14px 28px rgba(185, 74, 72, 0.24);
+  }}
+  .recorder-status {{
+    margin: 14px 0 0 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: rgba(0, 0, 0, 0.72);
+  }}
+  .recorder-status.live {{
+    color: #000000;
+  }}
+  .recorder-status.error {{
+    color: #b94a48;
+  }}
+  .main-app {{
+    display: block;
   }}
   .hero {{
     padding: 24px 24px 18px;
@@ -620,6 +863,7 @@ components.html(
     line-height: 1.6;
   }}
   @media (max-width: 900px) {{
+    .setup-grid,
     .hero-grid,
     .transcript-panel {{
       grid-template-columns: 1fr;
@@ -643,11 +887,56 @@ components.html(
 <body>
   <div class="shell">
     <div class="panel">
+      <section id="setup-screen" class="setup-screen">
+        <div id="setup-choice" class="setup-shell">
+          <p class="setup-eyebrow">Шаг 1</p>
+          <h2 class="setup-title">Сначала выберите референсный голос</h2>
+          <p class="setup-copy">
+            Перед основной записью нужно указать, каким голосом будет работать TTS.
+            Можно использовать заранее загруженный WAV-файл или записать короткий референс прямо сейчас.
+          </p>
+          <div class="setup-grid">
+            <button id="choose-upload" class="setup-option" type="button">
+              <strong>Выбрать референсное аудио</strong>
+              <span>Использовать WAV, который загружен выше в поле «Референсное аудио для TTS».</span>
+            </button>
+            <button id="choose-record" class="setup-option" type="button">
+              <strong>Записать аудио сейчас</strong>
+              <span>Откроется отдельное окно записи, и вы сможете сразу продиктовать три подготовленные фразы.</span>
+            </button>
+          </div>
+          <div class="setup-footer">
+            <span class="setup-pill">Источник перевода <b>{audio_label}</b></span>
+            <p id="setup-note" class="setup-note">Сделайте выбор, прежде чем запускать основную сессию перевода.</p>
+          </div>
+        </div>
+
+        <div id="setup-recorder" class="setup-shell is-hidden">
+          <p class="setup-eyebrow">Запись референса</p>
+          <h2 class="setup-title">Скажите три предложения для записи</h2>
+          <p class="setup-copy">
+            Нажмите кнопку записи, прочитайте фразы спокойно и без спешки, затем остановите запись.
+            Эта запись будет использована как референсный голос вместо загруженного файла.
+          </p>
+          <div class="record-phrases">
+            <div class="phrase">1. «Какая сегодня погода погоды в твоем городе?»</div>
+            <div class="phrase">2. «Отлично, я помогу тебе с этим прямо сейчас!»</div>
+            <div class="phrase">3. «Вот что я нашла по твоему запросу, слушай внимательно.»</div>
+          </div>
+          <div class="setup-actions">
+            <button id="setup-back" class="ghost-btn" type="button">Назад</button>
+            <button id="setup-record-btn" class="choice-btn" type="button">Начать запись</button>
+          </div>
+          <p id="recorder-status" class="recorder-status">Запись ещё не началась.</p>
+        </div>
+      </section>
+
+      <div id="main-app" class="main-app is-hidden">
       <section class="hero">
         <div class="topline">
           <div class="badge-row">
             <span class="badge">Источник <b>{audio_label}</b></span>
-            <span class="badge">Голос <b>{ref_audio_label}</b></span>
+            <span class="badge">Голос <b id="ref-badge-label">{ref_audio_label}</b></span>
             <span class="badge">Вывод <b id="badge-lang">EN</b></span>
           </div>
           <div class="status-pill" id="status">
@@ -737,6 +1026,7 @@ components.html(
         Подтверждённый текст остаётся в светлом по контрасту текстовом поле. Нестабильный хвост подсвечивается отдельно,
         поэтому пользователь видит, что система ещё дослушивает фразу.
       </div>
+      </div>
     </div>
   </div>
 
@@ -745,6 +1035,7 @@ const WS_URL = {json.dumps(ws_url)};
 const HAS_FILE = {str(bool(audio_b64)).lower()};
 const AUDIO_B64 = {json.dumps(audio_b64)};
 const REF_AUDIO_B64 = {json.dumps(ref_audio_b64)};
+const UPLOADED_REF_LABEL = {json.dumps(ref_audio_name if ref_audio_b64 else "")};
 const REF_TEXT = {json.dumps(ref_text_value)};
 
 const SAMPLE_RATE = 16000;
@@ -766,6 +1057,19 @@ let nextPlaybackTime = 0;
 let playbackActiveUntil = 0;
 let voiceLevel = 0.04;
 let animationFrame = null;
+let runtimeRefAudioB64 = REF_AUDIO_B64 || "";
+let runtimeRefLabel = REF_AUDIO_B64 ? (UPLOADED_REF_LABEL || "Загруженный референс") : "Не выбран";
+let setupComplete = true;
+
+let refRecorderStream = null;
+let refRecorderCtx = null;
+let refRecorderSource = null;
+let refRecorderProcessor = null;
+let refRecorderMute = null;
+let refRecorderChunks = [];
+let refRecorderSampleRate = SAMPLE_RATE;
+let refRecorderActive = false;
+let refRecorderCapture = null;
 
 const statusEl = document.getElementById("status");
 const statusTextEl = document.getElementById("status-text");
@@ -774,7 +1078,252 @@ const pendingEl = document.getElementById("pending");
 const cursorEl = document.getElementById("cursor");
 const helperTextEl = document.getElementById("helper-text");
 const modeLabelEl = document.getElementById("mode-label");
+const refBadgeLabelEl = document.getElementById("ref-badge-label");
 const voiceBars = Array.from(document.querySelectorAll(".voice-bar"));
+const setupScreenEl = document.getElementById("setup-screen");
+const setupChoiceEl = document.getElementById("setup-choice");
+const setupRecorderEl = document.getElementById("setup-recorder");
+const mainAppEl = document.getElementById("main-app");
+const setupNoteEl = document.getElementById("setup-note");
+const recorderStatusEl = document.getElementById("recorder-status");
+const setupRecordBtn = document.getElementById("setup-record-btn");
+const chooseUploadBtn = document.getElementById("choose-upload");
+const chooseRecordBtn = document.getElementById("choose-record");
+const setupBackBtn = document.getElementById("setup-back");
+
+function setVisibility(el, visible) {{
+  if (!el) return;
+  el.classList.toggle("is-hidden", !visible);
+}}
+
+function updateReferenceBadge() {{
+  if (refBadgeLabelEl) refBadgeLabelEl.textContent = runtimeRefLabel;
+}}
+
+function setSetupNote(text, isError = false) {{
+  if (!setupNoteEl) return;
+  setupNoteEl.textContent = text;
+  setupNoteEl.className = "setup-note" + (isError ? " error" : "");
+}}
+
+function setRecorderStatus(text, tone = "") {{
+  if (!recorderStatusEl) return;
+  recorderStatusEl.textContent = text;
+  recorderStatusEl.className = "recorder-status" + (tone ? " " + tone : "");
+}}
+
+function showSetupChoice() {{
+  setVisibility(setupChoiceEl, true);
+  setVisibility(setupRecorderEl, false);
+}}
+
+function showSetupRecorder() {{
+  setVisibility(setupChoiceEl, false);
+  setVisibility(setupRecorderEl, true);
+  setRecorderStatus(
+    "Нажмите «Начать запись», затем спокойно прочитайте все три предложения подряд.",
+    ""
+  );
+}}
+
+function finishSetup(helperText) {{
+  setupComplete = true;
+  setVisibility(setupScreenEl, false);
+  setVisibility(mainAppEl, true);
+  updateReferenceBadge();
+  setStatus("Готово к запуску", "", helperText);
+}}
+
+function chooseUploadedReference() {{
+  if (!REF_AUDIO_B64) {{
+    setSetupNote(
+      "Сначала загрузите WAV-файл в поле «Референсное аудио для TTS» выше, либо выберите запись референса прямо сейчас.",
+      true
+    );
+    return;
+  }}
+  runtimeRefAudioB64 = REF_AUDIO_B64;
+  runtimeRefLabel = UPLOADED_REF_LABEL || "Загруженный референс";
+  finishSetup("Референсный файл выбран. Теперь можно запускать основную запись и перевод.");
+}}
+
+function mergeFloat32Chunks(chunks) {{
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Float32Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {{
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }}
+  return merged;
+}}
+
+function writeAscii(view, offset, text) {{
+  for (let i = 0; i < text.length; i++) {{
+    view.setUint8(offset + i, text.charCodeAt(i));
+  }}
+}}
+
+function encodeWav(samples, sampleRate) {{
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, samples.length * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {{
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    const int16 = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    view.setInt16(offset, int16, true);
+  }}
+  return buffer;
+}}
+
+function arrayBufferToBase64(buffer) {{
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {{
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }}
+  return btoa(binary);
+}}
+
+async function cleanupReferenceRecorder() {{
+  if (refRecorderCapture) await closeMicrophoneCapture(refRecorderCapture);
+
+  refRecorderProcessor = null;
+  refRecorderSource = null;
+  refRecorderMute = null;
+  refRecorderStream = null;
+  refRecorderCtx = null;
+  refRecorderCapture = null;
+}}
+
+async function requestMicrophoneStream() {{
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {{
+    return navigator.mediaDevices.getUserMedia({{ audio: true }});
+  }}
+
+  const legacyGetUserMedia =
+    navigator.getUserMedia ||
+    navigator.webkitGetUserMedia ||
+    navigator.mozGetUserMedia ||
+    navigator.msGetUserMedia;
+
+  if (!legacyGetUserMedia) {{
+    throw new Error("getUserMedia is not available in this browser context");
+  }}
+
+  return new Promise((resolve, reject) => {{
+    legacyGetUserMedia.call(navigator, {{ audio: true }}, resolve, reject);
+  }});
+}}
+
+async function openMicrophoneCapture(onChunk) {{
+  const stream = await requestMicrophoneStream();
+  const ctx = new AudioContext({{ sampleRate: SAMPLE_RATE }});
+  const source = ctx.createMediaStreamSource(stream);
+  const processorNode = ctx.createScriptProcessor(4096, 1, 1);
+
+  processorNode.onaudioprocess = (event) => {{
+    const data = new Float32Array(event.inputBuffer.getChannelData(0));
+    pushVoiceLevel(measureFloat32Level(data));
+    onChunk(data);
+  }};
+
+  source.connect(processorNode);
+  processorNode.connect(ctx.destination);
+
+  return {{
+    stream,
+    ctx,
+    source,
+    processor: processorNode,
+  }};
+}}
+
+async function closeMicrophoneCapture(capture) {{
+  if (!capture) return;
+  if (capture.processor) capture.processor.disconnect();
+  if (capture.source) capture.source.disconnect();
+  if (capture.stream) capture.stream.getTracks().forEach((track) => track.stop());
+  if (capture.ctx) await capture.ctx.close().catch(() => {{}});
+}}
+
+async function startReferenceRecording() {{
+  refRecorderChunks = [];
+  refRecorderCapture = await openMicrophoneCapture((data) => {{
+    refRecorderChunks.push(data);
+  }});
+  refRecorderStream = refRecorderCapture.stream;
+  refRecorderCtx = refRecorderCapture.ctx;
+  refRecorderSource = refRecorderCapture.source;
+  refRecorderProcessor = refRecorderCapture.processor;
+  refRecorderSampleRate = SAMPLE_RATE;
+
+  refRecorderActive = true;
+  setupRecordBtn.classList.add("recording");
+  setupRecordBtn.textContent = "Остановить запись";
+  setRecorderStatus(
+    "Идёт запись. Прочитайте три предложения и нажмите кнопку ещё раз, когда закончите.",
+    "live"
+  );
+}}
+
+async function stopReferenceRecording() {{
+  refRecorderActive = false;
+  setupRecordBtn.classList.remove("recording");
+  setupRecordBtn.textContent = "Сохраняем запись...";
+  setupRecordBtn.disabled = true;
+  setRecorderStatus("Сохраняем WAV и подготавливаем референсный голос...", "");
+
+  const merged = mergeFloat32Chunks(refRecorderChunks);
+  await cleanupReferenceRecorder();
+
+  if (!merged.length || merged.length < refRecorderSampleRate * 2) {{
+    setupRecordBtn.disabled = false;
+    setupRecordBtn.textContent = "Начать запись";
+    setRecorderStatus("Запись получилась слишком короткой. Повторите и прочитайте все три предложения.", "error");
+    return;
+  }}
+
+  runtimeRefAudioB64 = arrayBufferToBase64(encodeWav(merged, refRecorderSampleRate));
+  runtimeRefLabel = "Записанный референс";
+  updateReferenceBadge();
+  setupRecordBtn.disabled = false;
+  setupRecordBtn.textContent = "Начать запись";
+  setRecorderStatus("Референс сохранён. Открываем основной экран.", "live");
+  finishSetup("Референс записан в браузере и будет использован вместо загруженного файла.");
+}}
+
+async function toggleReferenceRecording() {{
+  try {{
+    if (refRecorderActive) await stopReferenceRecording();
+    else await startReferenceRecording();
+  }} catch (error) {{
+    await cleanupReferenceRecorder();
+    refRecorderActive = false;
+    setupRecordBtn.classList.remove("recording");
+    setupRecordBtn.disabled = false;
+    setupRecordBtn.textContent = "Начать запись";
+    const reason = error && (error.message || error.name) ? ` (${{error.message || error.name}})` : "";
+    setRecorderStatus(`Не удалось получить доступ к микрофону для записи референса${{reason}}`, "error");
+  }}
+}}
 
 function setStatus(text, cls = "", helper = "") {{
   statusEl.className = "status-pill" + (cls ? " " + cls : "");
@@ -978,24 +1527,20 @@ async function streamFile() {{
 
 async function startMic() {{
   setModeLabel("Микрофон");
-  micStream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
-  inputCtx = new AudioContext({{ sampleRate: SAMPLE_RATE }});
-  micSrc = inputCtx.createMediaStreamSource(micStream);
-  processor = inputCtx.createScriptProcessor(4096, 1, 1);
-
   const chunkN = Math.floor(SAMPLE_RATE * CHUNK_SEC);
-  processor.onaudioprocess = (e) => {{
-    const data = e.inputBuffer.getChannelData(0);
-    pushVoiceLevel(measureFloat32Level(data));
+
+  const capture = await openMicrophoneCapture((data) => {{
     inputBuf.push(...data);
     while (inputBuf.length >= chunkN) {{
       const chunk = new Float32Array(inputBuf.splice(0, chunkN));
       if (ws?.readyState === WebSocket.OPEN) ws.send(chunk.buffer);
     }}
-  }};
+  }});
 
-  micSrc.connect(processor);
-  processor.connect(inputCtx.destination);
+  micStream = capture.stream;
+  inputCtx = capture.ctx;
+  micSrc = capture.source;
+  processor = capture.processor;
   setStatus(
     "Слушаем микрофон",
     "live",
@@ -1008,6 +1553,10 @@ function toggle() {{
 }}
 
 async function start() {{
+  if (!setupComplete) {{
+    setStatus("Сначала выберите голос", "error", "Нужно завершить шаг выбора референсного голоса перед основной записью.");
+    return;
+  }}
   if (animationFrame === null) animationFrame = window.requestAnimationFrame(animateVoiceLine);
   recording = true;
   setBtn(true);
@@ -1022,7 +1571,7 @@ async function start() {{
   ws.onopen = async () => {{
     ws.send(JSON.stringify({{
       event: "session_start",
-      ref_audio: REF_AUDIO_B64 || "",
+      ref_audio: runtimeRefAudioB64 || "",
       ref_text: REF_TEXT || "",
       lang: "Russian",
     }}));
@@ -1121,7 +1670,25 @@ function stop() {{
   ws = null;
 }}
 
+chooseUploadBtn.addEventListener("click", chooseUploadedReference);
+chooseRecordBtn.addEventListener("click", showSetupRecorder);
+setupBackBtn.addEventListener("click", async () => {{
+  if (refRecorderActive) {{
+    refRecorderActive = false;
+    await cleanupReferenceRecorder();
+  }}
+  setupRecordBtn.classList.remove("recording");
+  setupRecordBtn.disabled = false;
+  setupRecordBtn.textContent = "Начать запись";
+  showSetupChoice();
+}});
+setupRecordBtn.addEventListener("click", toggleReferenceRecording);
+
 setModeLabel(HAS_FILE ? "Файл" : "Микрофон");
+updateReferenceBadge();
+setVisibility(setupScreenEl, false);
+setVisibility(mainAppEl, true);
+setStatus("Готово к запуску", "", "Референсный голос уже подготовлен и сохранён. Можно начинать перевод.");
 if (animationFrame === null) animationFrame = window.requestAnimationFrame(animateVoiceLine);
 </script>
 </body>
