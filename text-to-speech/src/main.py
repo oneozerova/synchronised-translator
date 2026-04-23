@@ -345,7 +345,7 @@ async def ws_generate(websocket: WebSocket):
                 prompt_items = model.model.create_voice_clone_prompt(
                     ref_audio=cfg.ref_audio_path,
                     ref_text=cfg.ref_text,
-                    x_vector_only_mode=False,
+                    x_vector_only_mode=True,
                 )
             try:
                 await asyncio.to_thread(
