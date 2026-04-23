@@ -8,7 +8,7 @@ st.set_page_config(page_title="Live Translator + TTS", page_icon="🎧")
 st.title("🎧 Live Translator + TTS")
 st.caption("Аудио -> STT -> Перевод -> TTS (воспроизведение в реальном времени)")
 
-WS_URL = "ws://0.0.0.0:8000/ws"
+WS_URL = "ws://0.0.0.0:8010/ws"
 
 uploaded = st.file_uploader(
     "Аудиофайл (если не выбран, используется микрофон)",
