@@ -348,7 +348,7 @@ async def ws_generate(websocket: WebSocket):
             if cfg is None or stop_event.is_set():
                 continue
             if not prompt_items:
-                prompt_items = model.create_voice_clone_prompt(
+                prompt_items = model.model.create_voice_clone_prompt(
                     ref_audio=cfg.ref_audio_path,
                     ref_text=cfg.ref_text,
                     x_vector_only_mode=False,
