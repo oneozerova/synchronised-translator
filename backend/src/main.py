@@ -37,7 +37,7 @@ def _new_suffix(full_text: str, previous_full_text: str) -> str:
     if not previous:
         return current
     if current.startswith(previous):
-        return current[len(previous) :].strip()
+        return current[len(previous):].strip()
 
     overlap = min(len(previous), len(current))
     for size in range(overlap, 0, -1):
@@ -64,14 +64,19 @@ async def websocket_endpoint(client_ws: WebSocket):
 
     stt_url = settings.stt_websocket_url()
     tts_url = settings.tts_websocket_url()
-    print(stt_url, '\n', tts_url)
 
-    ref_audio_b64 = ""
-    ref_text = ""
-    tts_lang = settings.tts_default_lang
+    ref_audio_b64: str = ""
+    ref_text: str = ""
+    tts_lang: str = settings.tts_default_lang
 
-    display_stable = ""
-    last_stt_stable = ""
+    # ИСПРАВЛЕНИЕ 1: явный сигнал о том, что session_start получен.
+    # tts_sender будет ждать этого события перед отправкой "start" в TTS,
+    # иначе возникает гонка: tts_sender стартовал раньше, чем client_to_stt
+    # успел прочитать session_start — и TTS получал пустой ref_audio.
+    session_ready = asyncio.Event()
+
+    display_stable: str = ""    # накопленный итоговый текст (отправляется клиенту)
+    last_stt_stable: str = ""
     tts_text_queue: asyncio.Queue[str | None] = asyncio.Queue()
     shutdown_flag = asyncio.Event()
 
@@ -93,7 +98,7 @@ async def websocket_endpoint(client_ws: WebSocket):
         await client_ws.close(code=1011)
         return
 
-    async def client_to_stt():
+    async def client_to_stt() -> None:
         nonlocal ref_audio_b64, ref_text, tts_lang
         try:
             while not shutdown_flag.is_set():
@@ -113,6 +118,13 @@ async def websocket_endpoint(client_ws: WebSocket):
                         ref_audio_b64 = str(payload.get("ref_audio", "")).strip()
                         ref_text = str(payload.get("ref_text", ""))
                         tts_lang = str(payload.get("lang") or settings.tts_default_lang)
+                        # ИСПРАВЛЕНИЕ 1: сначала выставляем параметры,
+                        # только потом разблокируем tts_sender
+                        session_ready.set()
+                        logger.info(
+                            "session_start: lang=%s ref_text=%r ref_audio_len=%d",
+                            tts_lang, ref_text, len(ref_audio_b64),
+                        )
                         continue
                     if event == "session_end":
                         await tts_text_queue.put(None)
@@ -127,9 +139,10 @@ async def websocket_endpoint(client_ws: WebSocket):
             logger.exception("client_to_stt failed")
         finally:
             shutdown_flag.set()
+            session_ready.set()         # разблокируем tts_sender в случае ошибки
             await tts_text_queue.put(None)
 
-    async def stt_pipeline():
+    async def stt_pipeline() -> None:
         nonlocal display_stable, last_stt_stable
         try:
             while not shutdown_flag.is_set():
@@ -141,9 +154,13 @@ async def websocket_endpoint(client_ws: WebSocket):
                     stt_data = json.loads(msg)
                 except json.JSONDecodeError:
                     continue
+
                 stable_src = (stt_data.get("text") or "").strip()
-                pending_src = ""#(stt_data.get("pending") or "").strip()
-                new_piece = stable_src#_new_suffix(stable_src, last_stt_stable)
+                pending_src = (stt_data.get("pending") or "").strip()
+
+                # Берём только новую часть, чтобы не дублировать при кумулятивном STT
+                new_piece = _new_suffix(stable_src, last_stt_stable)
+
                 if new_piece:
                     if translation_session is not None:
                         try:
@@ -156,27 +173,35 @@ async def websocket_endpoint(client_ws: WebSocket):
                             tts_chunk = ""
                         tts_chunk = (tts_chunk or "").strip()
                         if tts_chunk:
+                            # ИСПРАВЛЕНИЕ 2: накапливаем переведённый текст
                             display_stable = f"{display_stable} {tts_chunk}".strip()
                             await tts_text_queue.put(tts_chunk)
                     else:
-                        tts_chunk = new_piece
-                        display_stable = stable_src
-                        await tts_text_queue.put(tts_chunk)
+                        # ИСПРАВЛЕНИЕ 2: накапливаем оригинальный текст (не перезаписываем)
+                        display_stable = f"{display_stable} {new_piece}".strip()
+                        await tts_text_queue.put(new_piece)
 
                 last_stt_stable = stable_src
 
+                # ИСПРАВЛЕНИЕ 2: отправляем display_stable (накопленный), а не stable_src
+                # (текущую фразу). Фронт просто отображает пришедшее значение — без
+                # собственной логики накопления.
                 await client_ws.send_text(
                     json.dumps(
                         {
                             "event": "translation",
-                            "stable": stable_src,
+                            "stable": display_stable,
                             "pending": pending_src,
                             "source_stable": stable_src,
                             "source_pending": pending_src,
                             "chars": len(display_stable),
                             "speed_logs": stt_data.get("speed_logs", ""),
                             "task": stt_data.get("task", "translate"),
-                            "lang": "en" if (stt_data.get("task") == "translate") else stt_data.get("lang", "ru"),
+                            "lang": (
+                                "en"
+                                if stt_data.get("task") == "translate"
+                                else stt_data.get("lang", "ru")
+                            ),
                             "through_translator": bool(settings.use_translator),
                         },
                         ensure_ascii=False,
@@ -192,8 +217,17 @@ async def websocket_endpoint(client_ws: WebSocket):
             shutdown_flag.set()
             await tts_text_queue.put(None)
 
-    async def tts_sender():
+    async def tts_sender() -> None:
         try:
+            # ИСПРАВЛЕНИЕ 1: ждём, пока client_to_stt получит session_start
+            # и выставит ref_audio_b64 / ref_text / tts_lang.
+            # Без этого ожидания tts_sender уходил вперёд и отправлял "start"
+            # с пустым ref_audio — TTS говорил случайным голосом.
+            await session_ready.wait()
+
+            if shutdown_flag.is_set():
+                return
+
             await tts_ws.send(
                 json.dumps(
                     {
@@ -204,6 +238,8 @@ async def websocket_endpoint(client_ws: WebSocket):
                     }
                 )
             )
+            logger.info("Sent TTS start: lang=%s ref_audio_len=%d", tts_lang, len(ref_audio_b64))
+
             seq = 0
             while not shutdown_flag.is_set():
                 text_chunk = await tts_text_queue.get()
@@ -219,7 +255,7 @@ async def websocket_endpoint(client_ws: WebSocket):
         finally:
             shutdown_flag.set()
 
-    async def tts_to_client():
+    async def tts_to_client() -> None:
         try:
             while not shutdown_flag.is_set():
                 msg = await tts_ws.recv()

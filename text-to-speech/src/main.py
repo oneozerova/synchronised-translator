@@ -6,7 +6,7 @@ import logging
 import struct
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ from faster_qwen3_tts import FasterQwen3TTS
 
 from src.settings import settings
 
-# ─── Модель / поток (как в исходном tts) ─────────────────────────────────────
+# ─── Модель / поток ───────────────────────────────────────────────────────────
 
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 SAMPLE_RATE = 24000
@@ -140,7 +140,7 @@ def _send_sync(loop: asyncio.AbstractEventLoop, coro: Any) -> None:
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         fut.result()
-    except Exception as exc:  # socket closed / client disconnected / cancelled
+    except Exception as exc:
         raise WebSocketClosedError("websocket closed") from exc
 
 
@@ -160,7 +160,8 @@ def _stream_one_text_chunk(
     cfg: SessionConfig,
     seq: int,
     text: str,
-    prompt_items, 
+    # ИСПРАВЛЕНИЕ 2: принимаем готовый x-vector (или None — тогда падаём на ref_audio)
+    xvec: Any | None,
 ) -> None:
     t0 = time.perf_counter()
     part_seq = 0
@@ -181,13 +182,29 @@ def _stream_one_text_chunk(
             },
         )
 
-        stream = model.generate_voice_clone_streaming(
-            text=text,
-            language=cfg.lang,
-            voice_clone_prompt=prompt_items,
-            xvec_only=True,
-            chunk_size=STREAM_CHUNK_SIZE,
-        )
+        # ИСПРАВЛЕНИЕ 2: используем xvec_only=True с ref_audio напрямую (как в warmup),
+        # либо передаём предварительно вычисленный xvec через voice_clone_prompt
+        # без дополнительного xvec_only=True — флаг и prompt взаимоисключающие.
+        if xvec is not None:
+            stream = model.generate_voice_clone_streaming(
+                text=text,
+                language=cfg.lang,
+                voice_clone_prompt=xvec,
+                # НЕ передаём xvec_only=True: prompt уже содержит готовый вектор,
+                # повторный флаг заставлял модель игнорировать prompt и
+                # выбирать случайный голос.
+                chunk_size=STREAM_CHUNK_SIZE,
+            )
+        else:
+            # Запасной путь: ref_audio + ref_text напрямую (как в warmup)
+            stream = model.generate_voice_clone_streaming(
+                text=text,
+                language=cfg.lang,
+                ref_audio=cfg.ref_audio_path,
+                ref_text=cfg.ref_text,
+                xvec_only=True,
+                chunk_size=STREAM_CHUNK_SIZE,
+            )
 
         for item in stream:
             if stop_event.is_set():
@@ -216,16 +233,18 @@ def _stream_one_text_chunk(
             part_seq += 1
 
     except WebSocketClosedError:
-        stop_event.set()
-        return
+        # Соединение закрыто — сигнализируем наверх, не трогаем stop_event
+        raise
     except Exception as e:
-        stop_event.set()
+        # ИСПРАВЛЕНИЕ 1: одиночная ошибка чанка больше не убивает всю очередь.
+        # Логируем, отправляем клиенту, но stop_event НЕ взводим.
+        log.error("Ошибка генерации чанка seq=%d: %s", seq, e)
         try:
             _send_json_sync(
                 loop,
                 websocket,
                 {
-                    "event": "error",
+                    "event": "chunk_error",
                     "scope": "chunk",
                     "seq": seq,
                     "message": str(e),
@@ -233,7 +252,7 @@ def _stream_one_text_chunk(
             )
         except Exception:
             pass
-        raise
+        # НЕ делаем raise — worker перейдёт к следующему чанку
     finally:
         elapsed = time.perf_counter() - t0
         if not stop_event.is_set():
@@ -260,7 +279,7 @@ async def ws_generate(websocket: WebSocket):
     model = get_model()
 
     cfg: SessionConfig | None = None
-    chunk_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=16)
+    chunk_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=64)
     stop_event = asyncio.Event()
 
     async def receiver() -> None:
@@ -316,37 +335,70 @@ async def ws_generate(websocket: WebSocket):
             log.info("Клиент отключился")
             stop_event.set()
         finally:
-            if not stop_event.is_set():
+            # Всегда ставим None в очередь, чтобы worker знал о завершении ввода.
+            # При stop_event тоже ставим — иначе worker зависнет в ожидании.
+            try:
+                chunk_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                # Очередь переполнена — освобождаем место и повторяем
                 try:
-                    await chunk_queue.put(None)
+                    chunk_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    chunk_queue.put_nowait(None)
                 except Exception:
                     pass
 
     async def worker() -> None:
         nonlocal cfg
-        prompt_items = None
-        while True:
-            if stop_event.is_set() and chunk_queue.empty():
-                break
 
+        # ИСПРАВЛЕНИЕ 2: xvec вычисляется один раз через asyncio.to_thread,
+        # чтобы не блокировать event loop во время загрузки аудио и inference.
+        xvec: Any | None = None
+        xvec_ready = False
+
+        while True:
             try:
-                item = await asyncio.wait_for(chunk_queue.get(), timeout=0.5)
+                item = await asyncio.wait_for(chunk_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
+                # Если соединение закрылось и очередь пуста — выходим
                 if stop_event.is_set():
                     break
                 continue
 
             if item is None:
+                # Сигнал завершения от receiver — очередь опустошена
                 break
 
-            if cfg is None or stop_event.is_set():
+            # ИСПРАВЛЕНИЕ 1: cfg is None — единственная причина пропустить чанк.
+            # stop_event больше НЕ является причиной пропуска: очередь надо дренировать
+            # до конца, чтобы клиент услышал все накопленные фразы.
+            if cfg is None:
+                log.warning("Пропущен чанк seq=%d: cfg не инициализирован", item["seq"])
                 continue
-            if not prompt_items:
-                prompt_items = model.model.create_voice_clone_prompt(
-                    ref_audio=cfg.ref_audio_path,
-                    ref_text=cfg.ref_text,
-                    x_vector_only_mode=True,
-                )
+
+            # ИСПРАВЛЕНИЕ 2: вычисляем xvec один раз, вне потока синтеза,
+            # через asyncio.to_thread — это тяжёлая CPU/GPU операция.
+            if not xvec_ready:
+                try:
+                    xvec = await asyncio.to_thread(
+                        model.model.create_voice_clone_prompt,
+                        cfg.ref_audio_path,
+                        cfg.ref_text,
+                        True,  # x_vector_only_mode
+                    )
+                    xvec_ready = True
+                    log.info("x-vector готов для сессии (ref: %s)", cfg.ref_audio_path)
+                except Exception as e:
+                    log.error(
+                        "Не удалось вычислить x-vector: %s. "
+                        "Будет использован прямой ref_audio путь.",
+                        e,
+                    )
+                    xvec = None
+                    xvec_ready = True  # помечаем как готово, чтобы не повторять
+
             try:
                 await asyncio.to_thread(
                     _stream_one_text_chunk,
@@ -357,13 +409,15 @@ async def ws_generate(websocket: WebSocket):
                     cfg,
                     item["seq"],
                     item["text"],
-                    prompt_items
+                    xvec,
                 )
             except WebSocketClosedError:
+                log.info("WebSocket закрыт во время генерации чанка seq=%d", item["seq"])
                 stop_event.set()
                 break
             except Exception as e:
-                stop_event.set()
+                # ИСПРАВЛЕНИЕ 1: не останавливаем сессию из-за одного сбойного чанка
+                log.error("Необработанная ошибка чанка seq=%d: %s", item["seq"], e)
                 try:
                     await websocket.send_json(
                         {
@@ -374,7 +428,7 @@ async def ws_generate(websocket: WebSocket):
                     )
                 except Exception:
                     pass
-                break
+                # Продолжаем обрабатывать следующие чанки
 
         try:
             if not stop_event.is_set():

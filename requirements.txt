@@ -1,7 +1,5 @@
---index-url https://download.pytorch.org/whl/cu126
-torch 
-torchvision 
-torchaudio
+--extra-index-url https://download.pytorch.org/whl/cu126
+
 uvicorn
 uvicorn[standard]
 faster_whisper
@@ -9,4 +7,8 @@ fastapi
 transformers
 pydantic_settings
 faster_qwen3_tts
-soudfile
+soundfile
+deepfilternet
+torch
+torchvision
+torchaudio
