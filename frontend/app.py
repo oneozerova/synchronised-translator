@@ -946,7 +946,7 @@ components.html(
         </div>
         <div class="hero-grid">
           <div>
-            <h2 class="headline">Текст остаётся основным результатом. Озвучка и анимация помогают понять, что происходит прямо сейчас.</h2>
+            <h2 class="headline">Текстовая и аудио трансляция перевода</h2>
             <p class="lead" id="helper-text">
               Нажмите запуск, затем говорите спокойно. Если используете микрофон, делайте короткую паузу между фразами,
               чтобы перевод успевал стабилизироваться.
@@ -980,7 +980,6 @@ components.html(
         <div class="voice-meta">
           <div>
             <p class="voice-title">Голосовая строка</p>
-            <p class="voice-caption">Анимация реагирует на микрофон, аудиофайл и воспроизведение TTS.</p>
           </div>
           <div class="badge-row">
             <span class="badge">Режим <b id="mode-label">Микрофон</b></span>
