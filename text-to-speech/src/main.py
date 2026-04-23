@@ -18,6 +18,7 @@ import torch
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+torchaudio.set_audio_backend("soundfile")
 from df import init_df, enhance # deepfilternet
 
 from faster_qwen3_tts import FasterQwen3TTS
@@ -36,6 +37,7 @@ DF_STATE = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("text-to-speech")
+
 
 _model: FasterQwen3TTS | None = None
 
