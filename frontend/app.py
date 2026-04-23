@@ -18,12 +18,43 @@ import streamlit.components.v1 as components
 REFERENCE_AUDIO_DIR = Path(__file__).resolve().parent / "reference_audio"
 REFERENCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 CURRENT_REFERENCE_WAV = REFERENCE_AUDIO_DIR / "current_reference.wav"
+CURRENT_REFERENCE_META = REFERENCE_AUDIO_DIR / "current_reference_meta.json"
+
+REFERENCE_PROMPTS = {
+    "Russian": (
+        "Сегодня, в 19:45, я спокойно объясню проект: цифры 12345, адрес e-mail@example.com, "
+        "а также паузы, интонацию и знаки — запятая, двоеточие, тире, вопрос и восклицание!"
+    ),
+    "English": (
+        "At exactly 7:45 p.m., I will clearly explain the project: numbers 12345, "
+        "an e-mail like sample.user@example.com, and punctuation - commas, colons, dashes, "
+        "questions, and exclamations!"
+    ),
+}
 
 
 def save_reference_wav(filename: str, data: bytes) -> Path:
     path = REFERENCE_AUDIO_DIR / filename
     path.write_bytes(data)
     return path
+
+
+def save_current_reference(data: bytes, source: str, lang: str) -> Path:
+    CURRENT_REFERENCE_WAV.write_bytes(data)
+    CURRENT_REFERENCE_META.write_text(
+        json.dumps({"source": source, "lang": lang}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return CURRENT_REFERENCE_WAV
+
+
+def load_current_reference_meta() -> dict:
+    if not CURRENT_REFERENCE_META.exists():
+        return {}
+    try:
+        return json.loads(CURRENT_REFERENCE_META.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
 
 st.set_page_config(page_title="Speech Translator", page_icon="🎙️", layout="wide")
 
@@ -230,9 +261,22 @@ controls_left, controls_right = st.columns([1.15, 0.85], gap="large")
 with controls_left:
     ws_url = st.text_input("Backend WebSocket URL", value="ws://127.0.0.1:8000/ws")
 with controls_right:
+    phrase_language = st.segmented_control(
+        "Язык референсной фразы",
+        options=["Russian", "English"],
+        default="Russian",
+        help="Выберите язык фразы, которую нужно произнести при записи референса.",
+    )
+    selected_reference_phrase = REFERENCE_PROMPTS[phrase_language]
+    st.text_area(
+        "Фраза для записи (прочитайте чётко, с пунктуацией)",
+        value=selected_reference_phrase,
+        height=120,
+        disabled=True,
+    )
     ref_text_value = st.text_input(
-        "Референсная фраза для TTS",
-        value="Это тестовая референсная фраза.",
+        "Референсный текст для TTS",
+        value=selected_reference_phrase,
     )
 
 if "ref_mode" not in st.session_state:
@@ -241,6 +285,8 @@ if "saved_reference_path" not in st.session_state:
     st.session_state.saved_reference_path = None
 if "saved_reference_source" not in st.session_state:
     st.session_state.saved_reference_source = None
+if "saved_reference_lang" not in st.session_state:
+    st.session_state.saved_reference_lang = None
 
 st.markdown("### Шаг 1. Выберите источник референсного голоса")
 ref_choice_left, ref_choice_right = st.columns(2, gap="large")
@@ -269,14 +315,8 @@ with st.expander("Источник аудио и настройки голоса
                 key="ref_uploaded_wav",
             )
         elif st.session_state.ref_mode == "record":
-            st.markdown(
-                """
-Скажите три предложения для записи:
-1. `Какая сегодня погода в Москве?`
-2. `Супер, я получил оффер в Яндекс!`
-3. `Вот, что я хочу рассказать, внимательно слушай.`
-"""
-            )
+            st.markdown("Скажите следующую фразу для записи референса:")
+            st.code(selected_reference_phrase, language=None)
             ref_uploaded = None
             recorded_ref = st.audio_input(
                 "Нажмите и запишите референсный голос",
@@ -297,30 +337,44 @@ ref_audio_name = "Голос по умолчанию"
 saved_reference_path = None
 if st.session_state.ref_mode == "upload" and ref_uploaded is not None:
     ref_bytes = ref_uploaded.getvalue()
-    saved_reference_path = save_reference_wav("uploaded_reference.wav", ref_bytes)
+    save_reference_wav("uploaded_reference.wav", ref_bytes)
+    saved_reference_path = save_current_reference(ref_bytes, "Загруженный WAV", phrase_language)
     ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
     ref_audio_name = ref_uploaded.name
     st.session_state.saved_reference_path = str(saved_reference_path)
     st.session_state.saved_reference_source = "Загруженный WAV"
+    st.session_state.saved_reference_lang = phrase_language
 elif st.session_state.ref_mode == "record" and recorded_ref is not None:
     ref_bytes = recorded_ref.getvalue()
-    saved_reference_path = save_reference_wav("recorded_reference.wav", ref_bytes)
+    save_reference_wav("recorded_reference.wav", ref_bytes)
+    saved_reference_path = save_current_reference(ref_bytes, "Записанный голос", phrase_language)
     ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
-    ref_audio_name = "recorded_reference.wav"
+    ref_audio_name = CURRENT_REFERENCE_WAV.name
     st.session_state.saved_reference_path = str(saved_reference_path)
     st.session_state.saved_reference_source = "Записанный голос"
+    st.session_state.saved_reference_lang = phrase_language
 elif st.session_state.saved_reference_path:
     saved_reference_path = Path(st.session_state.saved_reference_path)
     if saved_reference_path.exists():
         ref_bytes = saved_reference_path.read_bytes()
         ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
         ref_audio_name = saved_reference_path.name
+elif CURRENT_REFERENCE_WAV.exists():
+    saved_reference_path = CURRENT_REFERENCE_WAV
+    ref_bytes = saved_reference_path.read_bytes()
+    ref_audio_b64 = base64.b64encode(ref_bytes).decode("ascii")
+    ref_audio_name = saved_reference_path.name
+    loaded_meta = load_current_reference_meta()
+    st.session_state.saved_reference_path = str(saved_reference_path)
+    st.session_state.saved_reference_source = loaded_meta.get("source") or "Референс с прошлого запуска"
+    st.session_state.saved_reference_lang = loaded_meta.get("lang") or phrase_language
 
 if saved_reference_path is not None and saved_reference_path.exists():
+    saved_lang = st.session_state.saved_reference_lang or phrase_language
     st.info(
         "Референсный голос сохранён: "
         f"{saved_reference_path} "
-        f"({st.session_state.saved_reference_source or 'Референс'})"
+        f"({st.session_state.saved_reference_source or 'Референс'}, язык: {saved_lang})"
     )
 
 if not ref_audio_b64:
@@ -1037,6 +1091,7 @@ const AUDIO_B64 = {json.dumps(audio_b64)};
 const REF_AUDIO_B64 = {json.dumps(ref_audio_b64)};
 const UPLOADED_REF_LABEL = {json.dumps(ref_audio_name if ref_audio_b64 else "")};
 const REF_TEXT = {json.dumps(ref_text_value)};
+const REF_LANG = {json.dumps(phrase_language)};
 
 const SAMPLE_RATE = 16000;
 const CHUNK_SEC = 0.1;
@@ -1638,7 +1693,7 @@ async function start() {{
       event: "session_start",
       ref_audio: runtimeRefAudioB64 || "",
       ref_text: REF_TEXT || "",
-      lang: "Russian",
+      lang: REF_LANG || "Russian",
     }}));
     if (HAS_FILE) await streamFile();
     else await startMic();

@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import logging
+import re
+import time
 import wave
 from io import BytesIO
 
@@ -16,6 +18,24 @@ from src.translator import TranslationSession
 app = FastAPI()
 logger = logging.getLogger("backend-orchestrator")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+TTS_BUFFER_TARGET_WORDS = 8
+TTS_BUFFER_MIN_WORDS = 4
+TTS_BUFFER_IDLE_FLUSH_SEC = 1.4
+TTS_SENTENCE_END_RE = re.compile(r"[.!?…]+[\"')\]]*$")
+TTS_CLAUSE_END_RE = re.compile(r"[,;:]+[\"')\]]*$")
+TTS_EN_PAUSE_WORDS = {
+    "and",
+    "but",
+    "or",
+    "so",
+    "because",
+    "however",
+    "therefore",
+    "then",
+    "well",
+    "now",
+}
 
 
 def _make_silence_wav_base64(duration_sec: float = 0.5, sample_rate: int = 24000) -> str:
@@ -44,6 +64,31 @@ def _new_suffix(full_text: str, previous_full_text: str) -> str:
         if previous[-size:] == current[:size]:
             return current[size:].strip()
     return current
+
+
+def _word_count(text: str) -> int:
+    return len([w for w in text.split() if w])
+
+
+def _should_flush_tts_buffer(buffer_text: str, pending_src: str, idle_for_sec: float) -> bool:
+    cleaned = buffer_text.strip()
+    if not cleaned:
+        return False
+
+    words = _word_count(cleaned)
+    if words >= TTS_BUFFER_TARGET_WORDS:
+        return True
+    if words >= TTS_BUFFER_MIN_WORDS and TTS_SENTENCE_END_RE.search(cleaned):
+        return True
+    if words >= TTS_BUFFER_TARGET_WORDS - 1 and TTS_CLAUSE_END_RE.search(cleaned):
+        return True
+
+    last_word = re.sub(r"[^\w]+$", "", cleaned.split()[-1].lower())
+    if words >= TTS_BUFFER_TARGET_WORDS - 1 and last_word in TTS_EN_PAUSE_WORDS and not pending_src:
+        return True
+    if words >= TTS_BUFFER_MIN_WORDS and idle_for_sec >= TTS_BUFFER_IDLE_FLUSH_SEC and not pending_src:
+        return True
+    return False
 
 
 @app.get("/health")
@@ -77,6 +122,8 @@ async def websocket_endpoint(client_ws: WebSocket):
 
     display_stable: str = ""    # накопленный итоговый текст (отправляется клиенту)
     last_stt_stable: str = ""
+    tts_buffer: str = ""
+    tts_buffer_updated_at = time.monotonic()
     tts_text_queue: asyncio.Queue[str | None] = asyncio.Queue()
     shutdown_flag = asyncio.Event()
 
@@ -127,7 +174,7 @@ async def websocket_endpoint(client_ws: WebSocket):
                         )
                         continue
                     if event == "session_end":
-                        await tts_text_queue.put(None)
+                        logger.info("session_end received from client")
                         continue
 
                 bytes_data = packet.get("bytes")
@@ -143,7 +190,7 @@ async def websocket_endpoint(client_ws: WebSocket):
             await tts_text_queue.put(None)
 
     async def stt_pipeline() -> None:
-        nonlocal display_stable, last_stt_stable
+        nonlocal display_stable, last_stt_stable, tts_buffer, tts_buffer_updated_at
         try:
             while not shutdown_flag.is_set():
                 msg = await asyncio.wait_for(stt_ws.recv(), timeout=120.0)
@@ -175,11 +222,19 @@ async def websocket_endpoint(client_ws: WebSocket):
                         if tts_chunk:
                             # ИСПРАВЛЕНИЕ 2: накапливаем переведённый текст
                             display_stable = f"{display_stable} {tts_chunk}".strip()
-                            await tts_text_queue.put(tts_chunk)
+                            tts_buffer = f"{tts_buffer} {tts_chunk}".strip()
+                            tts_buffer_updated_at = time.monotonic()
                     else:
                         # ИСПРАВЛЕНИЕ 2: накапливаем оригинальный текст (не перезаписываем)
                         display_stable = f"{display_stable} {new_piece}".strip()
-                        await tts_text_queue.put(new_piece)
+                        tts_buffer = f"{tts_buffer} {new_piece}".strip()
+                        tts_buffer_updated_at = time.monotonic()
+
+                idle_for_sec = time.monotonic() - tts_buffer_updated_at
+                if _should_flush_tts_buffer(tts_buffer, pending_src, idle_for_sec):
+                    await tts_text_queue.put(tts_buffer.strip())
+                    tts_buffer = ""
+                    tts_buffer_updated_at = time.monotonic()
 
                 last_stt_stable = stable_src
 
@@ -214,6 +269,8 @@ async def websocket_endpoint(client_ws: WebSocket):
         except Exception:
             logger.exception("stt_pipeline failed")
         finally:
+            if tts_buffer.strip():
+                await tts_text_queue.put(tts_buffer.strip())
             shutdown_flag.set()
             await tts_text_queue.put(None)
 
