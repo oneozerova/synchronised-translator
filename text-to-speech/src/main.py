@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import asyncio
 import base64
 import logging
@@ -11,11 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torchaudio
 import soundfile as sf
 import torch
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from df import init_df, enhance # deepfilternet
 
 from faster_qwen3_tts import FasterQwen3TTS
 
@@ -28,6 +31,8 @@ SAMPLE_RATE = 24000
 WINDOW_SIZE = 10
 STREAM_CHUNK_SIZE = 4
 DTYPE = torch.bfloat16
+DF_MODEL = None
+DF_STATE = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("text-to-speech")
@@ -60,6 +65,44 @@ def _get_silence_wav_temp() -> str:
         sf.write(f.name, silence, SAMPLE_RATE)
         return f.name
 
+
+def denoise_audio(audio_np: np.ndarray, sample_rate: int = 48000) -> np.ndarray:
+    """
+    Удаление шума с DeepFilterNet2.
+    """
+    if DF_MODEL is None or DF_STATE is None:
+        try:
+            from df import init_df
+            DF_MODEL, DF_STATE, _ = init_df(model="DeepFilterNet2")
+            log.info("DeepFilterNet2 initialized")
+        except Exception as e:
+            log.error(f"DeepFilterNet2 init failed: {e}")
+            return audio_np
+    
+    try:
+        sr = 48000
+        if len(audio_np.shape) == 1:
+            audio_tensor = torch.from_numpy(audio_np).unsqueeze(0)
+        else:
+            audio_tensor = torch.from_numpy(audio_np.T).float()
+        
+        if sample_rate != sr:
+            audio_tensor = torchaudio.functional.resample(
+                audio_tensor, orig_freq=sample_rate, new_freq=sr
+            )
+        
+        if audio_tensor.shape[0] > 1:
+            audio_tensor = audio_tensor.mean(dim=0, keepdim=True)
+        
+        audio_np = audio_tensor.squeeze(0).numpy().astype(np.float32)
+        
+        denoised = enhance(DF_MODEL, DF_STATE, audio_np)
+        log.debug("Audio denoised")
+        return denoised
+        
+    except Exception as e:
+        log.error(f"Denoising failed: {e}")
+        return audio_np
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -95,15 +138,21 @@ app = FastAPI(title="Streaming TTS API", lifespan=lifespan)
 
 def _resolve_ref_audio_path(audio_b64: str) -> tuple[str, bool]:
     """
-    Возвращает (путь к wav, удалять ли при закрытии сессии).
-    Пустой ref -> resources/my_voice.wav, если есть; иначе временная тишина.
+    Возвращает (путь к denoised wav, удалять ли при закрытии сессии).
     """
     b64 = (audio_b64 or "").strip()
     if b64:
         raw = base64.b64decode(b64)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(raw)
+            try:
+                audio_np, sr = sf.read(io.BytesIO(raw))
+                denoised_np = denoise_audio(audio_np, sr)
+                sf.write(f, denoised_np, 48000, format='WAV')
+            except Exception as e:
+                log.error(f"Denoising failed, using original: {e}")
+                f.write(raw)
             return f.name, True
+    
     p = settings.default_ref_wav
     if p.is_file():
         return str(p), False
