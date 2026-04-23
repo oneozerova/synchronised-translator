@@ -70,6 +70,12 @@ async def lifespan(_app: FastAPI):
         device="cuda" if torch.cuda.is_available() else "cpu",
         dtype=DTYPE,
     )
+    
+    prompt_items = _model.create_voice_clone_prompt(
+        ref_audio=ref_audio,
+        ref_text=ref_text,
+        x_vector_only_mode=False,
+    )
 
     warmup_path: str | None = None
     try:
@@ -160,6 +166,7 @@ def _stream_one_text_chunk(
     cfg: SessionConfig,
     seq: int,
     text: str,
+    prompt_items, 
 ) -> None:
     t0 = time.perf_counter()
     part_seq = 0
@@ -183,8 +190,7 @@ def _stream_one_text_chunk(
         stream = model.generate_voice_clone_streaming(
             text=text,
             language=cfg.lang,
-            ref_audio=cfg.ref_audio_path,
-            ref_text=cfg.ref_text,
+            voice_clone_prompt=prompt_items,
             xvec_only=True,
             chunk_size=STREAM_CHUNK_SIZE,
         )
@@ -324,6 +330,7 @@ async def ws_generate(websocket: WebSocket):
 
     async def worker() -> None:
         nonlocal cfg
+        prompt_items = None
         while True:
             if stop_event.is_set() and chunk_queue.empty():
                 break
@@ -340,7 +347,12 @@ async def ws_generate(websocket: WebSocket):
 
             if cfg is None or stop_event.is_set():
                 continue
-
+            if not prompt_items:
+                prompt_items = model.create_voice_clone_prompt(
+                    ref_audio=cfg.ref_audio_path,
+                    ref_text=cfg.ref_text,
+                    x_vector_only_mode=False,
+                )
             try:
                 await asyncio.to_thread(
                     _stream_one_text_chunk,
@@ -351,6 +363,7 @@ async def ws_generate(websocket: WebSocket):
                     cfg,
                     item["seq"],
                     item["text"],
+                    prompt_items
                 )
             except WebSocketClosedError:
                 stop_event.set()
