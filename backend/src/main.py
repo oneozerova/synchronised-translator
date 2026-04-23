@@ -141,10 +141,9 @@ async def websocket_endpoint(client_ws: WebSocket):
                     stt_data = json.loads(msg)
                 except json.JSONDecodeError:
                     continue
-
-                stable_src = (stt_data.get("stable") or "").strip()
-                pending_src = (stt_data.get("pending") or "").strip()
-                new_piece = _new_suffix(stable_src, last_stt_stable)
+                stable_src = (stt_data.get("text") or "").strip()
+                pending_src = ""#(stt_data.get("pending") or "").strip()
+                new_piece = stable_src#_new_suffix(stable_src, last_stt_stable)
                 if new_piece:
                     if translation_session is not None:
                         try:
@@ -170,7 +169,7 @@ async def websocket_endpoint(client_ws: WebSocket):
                     json.dumps(
                         {
                             "event": "translation",
-                            "stable": display_stable,
+                            "stable": stable_src,
                             "pending": pending_src,
                             "source_stable": stable_src,
                             "source_pending": pending_src,

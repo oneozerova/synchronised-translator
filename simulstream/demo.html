@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SimulStreaming Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      background: #0d0f12;
+      color: #e2e8f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      padding: 14px 24px;
+      background: #12151b;
+      border-bottom: 1px solid #1e2433;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    header h1 { font-size: 15px; color: #7dd3fc; letter-spacing: 0.04em; }
+    .tag {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      background: #1e3a5f;
+      color: #7dd3fc;
+    }
+    .controls {
+      padding: 14px 24px;
+      background: #12151b;
+      border-bottom: 1px solid #1e2433;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    select, input {
+      background: #1a1e2a;
+      border: 1px solid #2d3748;
+      color: #e2e8f0;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    button {
+      padding: 7px 18px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      transition: all 0.15s;
+    }
+    #startBtn { background: #166534; color: #bbf7d0; }
+    #startBtn:hover { background: #15803d; }
+    #startBtn.recording { background: #991b1b; color: #fecaca; }
+    #startBtn.recording:hover { background: #b91c1c; }
+    #clearBtn { background: #1e2433; color: #94a3b8; }
+    #clearBtn:hover { background: #2d3748; }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #4b5563;
+      transition: background 0.3s;
+    }
+    .dot.active { background: #ef4444; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    .status-bar {
+      font-size: 12px;
+      color: #64748b;
+      padding: 0 4px;
+    }
+    .output {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: #1e2433;
+      overflow: hidden;
+    }
+    .panel {
+      background: #0d0f12;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 8px 16px;
+      background: #12151b;
+      border-bottom: 1px solid #1e2433;
+      font-size: 11px;
+      color: #475569;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .panel-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .chunk {
+      padding: 8px 12px;
+      border-radius: 6px;
+      border-left: 3px solid transparent;
+      font-size: 14px;
+      line-height: 1.5;
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .chunk.partial { border-color: #1d4ed8; background: #0f172a; color: #94a3b8; }
+    .chunk.final   { border-color: #15803d; background: #052e16; color: #bbf7d0; }
+    .chunk.unconfirmed { font-style: italic; color: #6b7280; font-size: 13px; }
+    .chunk.info    { border-color: #854d0e; background: #1c0a00; color: #fbbf24; font-size: 12px; }
+    .chunk.error   { border-color: #991b1b; background: #1a0000; color: #fca5a5; font-size: 12px; }
+    .ts { font-size: 11px; color: #4b5563; margin-top: 2px; }
+    .log-panel {
+      background: #0a0c10;
+      border-top: 1px solid #1e2433;
+      height: 80px;
+      overflow-y: auto;
+      padding: 6px 16px;
+      font-size: 11px;
+      color: #4b5563;
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>SimulStreaming</h1>
+  <span class="tag">real-time speech translation</span>
+</header>
+
+<div class="controls">
+  <label style="font-size:12px;color:#64748b">src</label>
+  <select id="srcLang">
+    <option value="en">English</option>
+    <option value="de">German</option>
+    <option value="cs">Czech</option>
+    <option value="fr">French</option>
+    <option value="es">Spanish</option>
+    <option value="ru">Russian</option>
+    <option value="zh">Chinese</option>
+    <option value="auto">Auto</option>
+  </select>
+  <label style="font-size:12px;color:#64748b">→</label>
+  <select id="tgtLang">
+    <option value="de">German</option>
+    <option value="en">English</option>
+    <option value="fr">French</option>
+    <option value="es">Spanish</option>
+    <option value="ru">Russian</option>
+    <option value="cs">Czech</option>
+    <option value="uk">Ukrainian</option>
+  </select>
+  <select id="mode">
+    <option value="cascade">ASR + LLM Translation</option>
+    <option value="whisper">ASR only</option>
+  </select>
+  <div class="dot" id="dot"></div>
+  <button id="startBtn" onclick="toggleRecording()">🎙 Start</button>
+  <button id="clearBtn" onclick="clearOutput()">Clear</button>
+  <span class="status-bar" id="statusBar">Idle</span>
+</div>
+
+<div class="output">
+  <div class="panel">
+    <div class="panel-header">Source (ASR)</div>
+    <div class="panel-content" id="srcPanel"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">Translation (LLM)</div>
+    <div class="panel-content" id="tgtPanel"></div>
+  </div>
+</div>
+
+<div class="log-panel" id="logPanel"></div>
+
+<script>
+let ws = null;
+let recorder = null;
+let recording = false;
+const WS_HOST = location.hostname + ':8000';
+
+function log(msg) {
+  const p = document.getElementById('logPanel');
+  const line = document.createElement('div');
+  line.textContent = new Date().toISOString().slice(11,23) + ' ' + msg;
+  p.appendChild(line);
+  p.scrollTop = p.scrollHeight;
+}
+
+function setStatus(s) {
+  document.getElementById('statusBar').textContent = s;
+}
+
+function toggleRecording() {
+  if (recording) stopRecording(); else startRecording();
+}
+
+async function startRecording() {
+  const srcLang = document.getElementById('srcLang').value;
+  const tgtLang = document.getElementById('tgtLang').value;
+  const mode    = document.getElementById('mode').value;
+  const url = `ws://${WS_HOST}/ws/translate?src_lang=${srcLang}&tgt_lang=${tgtLang}&mode=${mode}`;
+
+  log(`Connecting to ${url}`);
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = async () => {
+    log('WebSocket connected');
+    setStatus('Connected');
+    recording = true;
+    document.getElementById('startBtn').textContent = '⏹ Stop';
+    document.getElementById('startBtn').classList.add('recording');
+    document.getElementById('dot').classList.add('active');
+    await startMic();
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') handleMessage(JSON.parse(e.data));
+  };
+
+  ws.onclose = () => {
+    log('WebSocket closed');
+    stopAll();
+  };
+
+  ws.onerror = (e) => {
+    log('WebSocket error: ' + e);
+    stopAll();
+  };
+}
+
+function stopRecording() {
+  if (ws) { ws.send('DONE'); }
+  stopAll();
+}
+
+function stopAll() {
+  recording = false;
+  document.getElementById('startBtn').textContent = '🎙 Start';
+  document.getElementById('startBtn').classList.remove('recording');
+  document.getElementById('dot').classList.remove('active');
+  setStatus('Idle');
+  if (recorder) { recorder.disconnect(); recorder = null; }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  ws = null;
+}
+
+async function startMic() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  const source = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(3200, 1, 1);
+  recorder = proc;
+
+  proc.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const f32 = e.inputBuffer.getChannelData(0);
+    const i16 = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) {
+      i16[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32767)));
+    }
+    ws.send(i16.buffer);
+    setStatus(`Streaming … ${(i16.buffer.byteLength / 2 / 16000 * 1000).toFixed(0)}ms chunk`);
+  };
+
+  source.connect(proc);
+  proc.connect(ctx.destination);
+  log('Microphone streaming started');
+}
+
+function handleMessage(msg) {
+  const src = document.getElementById('srcPanel');
+  const tgt = document.getElementById('tgtPanel');
+
+  if (msg.type === 'info') { log('ℹ ' + msg.detail); return; }
+  if (msg.type === 'error') {
+    appendChunk(src, msg.detail || 'error', 'error');
+    return;
+  }
+
+  if (msg.src_text) appendChunk(src, msg.src_text, msg.is_final ? 'final' : 'partial', msg.start, msg.end);
+
+  if (msg.tgt_text) appendChunk(tgt, msg.tgt_text, msg.is_final ? 'final' : 'partial', null, msg.end);
+  if (msg.unconfirmed && !msg.tgt_text) appendChunk(tgt, msg.unconfirmed, 'unconfirmed');
+}
+
+function appendChunk(panel, text, cls, start, end) {
+  if (!text.trim()) return;
+  const div = document.createElement('div');
+  div.className = 'chunk ' + cls;
+  div.textContent = text;
+  if (start != null || end != null) {
+    const ts = document.createElement('div');
+    ts.className = 'ts';
+    ts.textContent = [start?.toFixed(2), end?.toFixed(2)].filter(Boolean).join(' – ') + 's';
+    div.appendChild(ts);
+  }
+  panel.appendChild(div);
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function clearOutput() {
+  document.getElementById('srcPanel').innerHTML = '';
+  document.getElementById('tgtPanel').innerHTML = '';
+}
+</script>
+</body>
+</html>

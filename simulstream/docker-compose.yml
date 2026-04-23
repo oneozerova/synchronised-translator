@@ -1,0 +1,98 @@
+services:
+
+  # ── Whisper ASR TCP Server ────────────────────────────────────────────
+  whisper-server:
+    build:
+      context: ../SimulStreaming
+      dockerfile: Dockerfile.whisper      # see below for Dockerfile examples
+    image: simulstreaming-whisper:latest
+    command:
+      - python3
+      - simulstreaming_whisper_server.py
+      - --host=0.0.0.0
+      - --port=43001
+      - --model_path=/models/large-v3.pt
+      - --lan=auto
+      - --task=transcribe
+      - --beams=5
+      - --vac
+      - --min-chunk-size=1.0
+      - --frame_threshold=8
+    ports:
+      - "43001:43001"
+    volumes:
+      - whisper_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "43001"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── LLM Translation TCP Server ────────────────────────────────────────
+  translate-server:
+    build:
+      context: ../SimulStreaming
+      dockerfile: Dockerfile.translate
+    image: simulstreaming-translate:latest
+    command:
+      - python3
+      - simulstreaming_translate_server.py
+      - --host=0.0.0.0
+      - --port=43002
+      - --model-dir=/models/ct2_EuroLLM-9B-Instruct
+      - --tokenizer-dir=/models/EuroLLM-9B-Instruct
+      - --min-chunk-size=3
+    ports:
+      - "43002:43002"
+    volumes:
+      - translate_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    depends_on:
+      whisper-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "43002"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: simulstreaming-backend:latest
+    ports:
+      - "8000:8000"
+    environment:
+      MANAGE_SUBPROCESSES: "false"          # servers managed by compose
+      WHISPER_HOST: whisper-server
+      WHISPER_PORT: 43001
+      TRANSLATE_HOST: translate-server
+      TRANSLATE_PORT: 43002
+      CORS_ORIGINS: '["*"]'
+    depends_on:
+      whisper-server:
+        condition: service_healthy
+      translate-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  whisper_models:
+  translate_models:

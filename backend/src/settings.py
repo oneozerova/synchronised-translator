@@ -19,10 +19,10 @@ class Settings(BaseSettings):
     stt_url: str | None = None
     tts_url: str | None = None
 
-    service_proxy_base: str = "wss://apollo2.ci.nsu.ru/i.kadilenko/proxy"
-    stt_port: int = 8001
+    service_proxy_base: str = "127.0.0.1"
+    stt_port: int = 8010
     stt_path: str = "/ws"
-    tts_port: int = 8003
+    tts_port: int = 8011
     tts_path: str = "/api/generate"
 
     use_translator: bool = False
