@@ -40,7 +40,7 @@ VAD_THRESHOLD = 0.75
 # ──────────────────────────────────────────────────────────────────────────────
 
 # [АКТИВНА] large-v3 поддерживает task="translate"
-model = WhisperModel("large-v3", device="cuda", compute_type="float32")
+model = WhisperModel("large-v3", device="cuda", compute_type="int8_float16")
 
 # [ПОДЛОДКА LARGE] только TASK="transcribe"
 # model = WhisperModel("avazir/faster-distil-whisper-large-v3-ru", device="cuda", compute_type="float16")
@@ -83,6 +83,8 @@ PROMPT_WORDS = 10
 # гипотезы между итерациями — LocalAgreement сходится быстрее.
 BEAM_SIZE = 15
 
+GRACE_SEC = 0.4
+
 MIN_NEW_SAMPLES    = int(SAMPLE_RATE * MIN_NEW_SEC)
 OVERLAP_SAMPLES    = int(SAMPLE_RATE * OVERLAP_SEC)
 MAX_WINDOW_SAMPLES = int(SAMPLE_RATE * MAX_WINDOW_SEC)
@@ -94,6 +96,14 @@ BUFFER_TRIM_SAMP   = int(SAMPLE_RATE * BUFFER_TRIM_SEC)
 #  Портировано из whisper_streaming/whisper_online.py
 #  Macháček, Dabre, Bojar — IJCNLP-AACL 2023
 # ══════════════════════════════════════════════════════════════════════════════
+
+import re
+import unicodedata
+
+def norm_word(w: str) -> str:
+    w = unicodedata.normalize("NFKC", w).strip().lower()
+    w = re.sub(r"[^\w\u0400-\u04FF]+$", "", w)  # убрать хвостовую пунктуацию
+    return w
 
 class HypothesisBuffer:
     """
@@ -131,7 +141,8 @@ class HypothesisBuffer:
         # 2. Фильтр по времени
         self.new = [
             (a, b, t) for a, b, t in new_abs
-            if a > self.last_committed_time - 0.1
+            # if a > self.last_committed_time - 0.1  # или 0.6
+            if b > self.last_committed_time - GRACE_SEC
         ]
         if not self.new:
             return
@@ -155,33 +166,25 @@ class HypothesisBuffer:
                     self.new = self.new[i:]
                     break
 
-    def flush(self) -> list[tuple[float, float, str]]:
-        """
-        Коммитит общий префикс self.buffer (prev) и self.new (curr).
-        После вызова: self.buffer = оставшаяся часть self.new
-        (т.е. НЕ включает только что закоммиченные слова —
-        это ключевое для предотвращения повторного коммита).
-        """
+    def flush(self):
         commit = []
-        while self.new:
-            na, nb, nt = self.new[0]
-            if not self.buffer:
+        i = 0
+        while i < min(len(self.buffer), len(self.new)):
+            if norm_word(self.buffer[i][2]) != norm_word(self.new[i][2]):
                 break
-            if nt == self.buffer[0][2]:
-                commit.append((na, nb, nt))
-                self.last_committed_time = nb
-                self.last_committed_word = nt
-                self.buffer.pop(0)
-                self.new.pop(0)
-            else:
-                break
-
-        # buffer = незакоммиченный остаток текущей гипотезы
-        self.buffer = self.new
-        self.new    = []
+            commit.append(self.new[i])
+            i += 1
+    
+        self.buffer = self.new[i:]
+        self.new = []
         self.committed_in_buffer.extend(commit)
+    
+        if commit:
+            self.last_committed_time = commit[-1][1]
+            self.last_committed_word = commit[-1][2]
+    
         return commit
-
+    
     def pop_committed(self, trim_time: float) -> None:
         """Удалить из committed_in_buffer слова до trim_time (после trim буфера)."""
         while (self.committed_in_buffer
