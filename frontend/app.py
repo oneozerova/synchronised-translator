@@ -61,170 +61,194 @@ st.set_page_config(page_title="Speech Translator", page_icon="🎙️", layout="
 st.markdown(
     """
 <style>
-  .stApp {
-    background: #FDB492;
-    color: #000000;
-  }
 
-  .block-container {
-    max-width: 1180px;
-    padding-top: 2rem;
-    padding-bottom: 2.2rem;
-  }
+/* =========================
+   BASE
+========================= */
+.stApp {
+  background: #FDB492;
+  color: #000000;
+}
 
-  h1, h2, h3 {
-    font-family: "Avenir Next", "Trebuchet MS", sans-serif;
-    letter-spacing: -0.02em;
-    color: #000000;
-  }
+.block-container {
+  max-width: 1180px;
+  padding-top: 2rem;
+  padding-bottom: 2.2rem;
+}
 
-  p, div, span, label {
-    color: #000000;
-  }
+h1, h2, h3 {
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+  letter-spacing: -0.02em;
+  color: #000000;
+}
 
-  .hero-shell {
-    border: 1px solid rgba(0, 0, 0, 0.12);
-    border-radius: 28px;
-    padding: 28px 30px;
-    margin-bottom: 18px;
-    background: rgba(255, 244, 237, 0.58);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.10);
-  }
+p, div, span, label {
+  color: #000000;
+}
 
+/* =========================
+   HERO
+========================= */
+.hero-shell {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 28px;
+  padding: 28px 30px;
+  margin-bottom: 18px;
+  background: rgba(255, 244, 237, 0.58);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.10);
+}
+
+.hero-title {
+  margin: 0 0 10px 0;
+  font-size: 2.5rem;
+}
+
+.hero-subtitle {
+  margin: 0;
+  max-width: 760px;
+  font-size: 1.06rem;
+  line-height: 1.55;
+}
+
+/* =========================
+   INPUTS
+========================= */
+div[data-baseweb="input"] > div,
+div[data-baseweb="base-input"] > div,
+.stTextInput > div > div,
+.stFileUploader,
+section[data-testid="stFileUploaderDropzone"] {
+  background: rgba(255, 248, 242, 0.72) !important;
+  border: 1px solid rgba(0, 0, 0, 0.12) !important;
+  border-radius: 16px !important;
+}
+
+/* ===== TEXTAREA FIX (FINAL) ===== */
+.stTextArea textarea,
+.stTextArea textarea:disabled,
+.stTextArea textarea:focus {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+  opacity: 1 !important;
+}
+
+/* =========================
+   TEXTAREA FIX
+========================= */
+.stTextArea > div > div {
+  background: rgba(255, 248, 242, 0.92) !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(0,0,0,0.12) !important;
+}
+
+/* иногда Streamlit кладёт текст сюда */
+.stTextArea * {
+  color: #000000 !important;
+}
+
+.stTextArea label {
+  color: #000000 !important;
+  background: transparent !important;
+}
+
+/* =========================
+   BUTTONS FIX
+========================= */
+button,
+.stButton > button,
+[data-testid="stBaseButton-primary"],
+[data-testid="stBaseButton-secondary"] {
+  background: rgba(255, 248, 242, 0.92) !important;
+  color: #000000 !important;
+  border-radius: 14px !important;
+  border: 1px solid rgba(0, 0, 0, 0.15) !important;
+}
+
+button:hover,
+.stButton > button:hover {
+  background: #799DFF !important;
+  color: #000000 !important;
+}
+
+/* =========================
+   FILE UPLOADER FIX
+========================= */
+[data-testid="stFileUploader"] button {
+  background: rgba(255, 248, 242, 0.92) !important;
+  color: #000000 !important;
+  border: 1px solid rgba(0, 0, 0, 0.15) !important;
+}
+
+[data-testid="stFileUploader"] button:hover {
+  background: #799DFF !important;
+}
+
+/* =========================
+   SEGMENTED CONTROL FIX
+========================= */
+[data-baseweb="segment"] {
+  background: rgba(255, 248, 242, 0.6) !important;
+  border-radius: 12px !important;
+}
+
+[data-baseweb="segment"] div {
+  color: #000000 !important;
+}
+
+[data-baseweb="segment"] [aria-checked="true"] {
+  background: #799DFF !important;
+  color: #000000 !important;
+}
+
+/* =========================
+   EXPANDER FIX
+========================= */
+[data-testid="stExpander"] summary {
+  background: rgba(255, 248, 242, 0.92) !important;
+  color: #000000 !important;
+  padding: 10px 14px;
+  border-radius: 14px;
+}
+
+[data-testid="stExpander"] details {
+  background: rgba(255, 244, 237, 0.58);
+  border-radius: 18px;
+  border: 1px solid rgba(0, 0, 0, 0.10);
+}
+
+[data-testid="stExpander"] details > div {
+  background: rgba(255, 248, 242, 0.72) !important;
+}
+
+/* =========================
+   LABEL FIX (GLOBAL)
+========================= */
+label,
+[data-testid="stWidgetLabel"] {
+  color: #000000 !important;
+  background: transparent !important;
+}
+
+[data-testid="stWidgetLabel"] * {
+  color: #000000 !important;
+}
+
+/* =========================
+   MISC
+========================= */
+[data-testid="stHeader"] {
+  background: transparent !important;
+}
+
+/* =========================
+   RESPONSIVE
+========================= */
+@media (max-width: 900px) {
   .hero-title {
-    margin: 0 0 10px 0;
-    font-size: 2.5rem;
-    line-height: 1;
-    color: #000000;
+    font-size: 2rem;
   }
+}
 
-  .hero-subtitle {
-    margin: 0;
-    max-width: 760px;
-    font-size: 1.06rem;
-    line-height: 1.55;
-    color: #000000;
-  }
-
-  .tip-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 18px;
-  }
-
-  .tip-card {
-    border-radius: 18px;
-    padding: 14px 16px;
-    background: rgba(255, 248, 242, 0.72);
-    border: 1px solid rgba(0, 0, 0, 0.10);
-  }
-
-  .tip-title {
-    display: block;
-    margin-bottom: 4px;
-    font-size: 0.82rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #000000;
-  }
-
-  .tip-text {
-    font-size: 0.98rem;
-    line-height: 1.4;
-    color: #000000;
-  }
-
-  .section-note {
-    margin: 10px 0 18px 0;
-    color: #000000;
-    font-size: 0.96rem;
-  }
-
-  /* input wrappers */
-  div[data-baseweb="input"] > div,
-  div[data-baseweb="base-input"] > div,
-  .stTextInput > div > div,
-  .stFileUploader,
-  section[data-testid="stFileUploaderDropzone"] {
-    background: rgba(255, 248, 242, 0.72) !important;
-    border: 1px solid rgba(0, 0, 0, 0.12) !important;
-    color: #000000 !important;
-    border-radius: 16px !important;
-  }
-
-  input, textarea {
-    color: #000000 !important;
-    background: transparent !important;
-    -webkit-text-fill-color: #000000 !important;
-  }
-
-  input::placeholder,
-  textarea::placeholder {
-    color: #000000 !important;
-  }
-
-  label, .stMarkdown, .stTextInput label {
-    color: #000000 !important;
-  }
-
-  .stFileUploader label,
-  .stFileUploader label span,
-  .stFileUploader [data-testid="stWidgetLabel"],
-  .stFileUploader [data-testid="stWidgetLabel"] *,
-  [data-testid="stFileUploader"] label,
-  [data-testid="stFileUploader"] label * {
-    color: #000000 !important;
-  }
-
-  .stFileUploader button,
-  .stFileUploader button span,
-  [data-testid="stFileUploader"] button,
-  [data-testid="stFileUploader"] button span,
-  [data-testid="stBaseButton-secondary"],
-  [data-testid="stBaseButton-secondary"] * {
-    color: #000000 !important;
-  }
-
-  /* expander */
-  [data-testid="stExpander"] details {
-    background: rgba(255, 244, 237, 0.58);
-    border-radius: 18px;
-    border: 1px solid rgba(0, 0, 0, 0.10);
-    overflow: hidden;
-  }
-
-  [data-testid="stExpander"] summary {
-    color: #000000 !important;
-  }
-
-  [data-testid="stExpander"] details > div {
-    background: transparent !important;
-  }
-
-  /* helper text / uploader text */
-  .stFileUploader small,
-  .stTextInput small,
-  [data-testid="stFileUploaderDropzoneInstructions"],
-  [data-testid="stFileUploaderDropzone"] small,
-  [data-testid="stFileUploaderDropzoneInstructions"] *,
-  [data-testid="stFileUploaderDropzone"] small * {
-    color: #000000 !important;
-  }
-
-  /* remove white headers/containers if theme leaks */
-  [data-testid="stHeader"] {
-    background: transparent !important;
-  }
-
-  @media (max-width: 900px) {
-    .tip-grid {
-      grid-template-columns: 1fr;
-    }
-    .hero-title {
-      font-size: 2rem;
-    }
-  }
 </style>
 """,
     unsafe_allow_html=True,
